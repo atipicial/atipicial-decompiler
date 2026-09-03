@@ -1,0 +1,80 @@
+import { isSimpleConditional, popConditionForLoop } from "./high-level-control-flow-shared.js";
+import { recordStackSnapshot, restoreStackAtLabel } from "./high-level-stack-flow.js";
+import { jumpTarget } from "./high-level-utils.js";
+import { hexOffset } from "./util.js";
+
+export function collectLabelTargets(instructions) {
+  const knownOffsets = new Set(instructions.map((instruction) => instruction.offset));
+  const labelTargets = new Set();
+
+  for (const instruction of instructions) {
+    const target = jumpTarget(instruction);
+    if (target === null) {
+      continue;
+    }
+    if (
+      instruction.opcode.mnemonic === "JMP" ||
+      instruction.opcode.mnemonic === "JMP_L" ||
+      instruction.opcode.mnemonic === "ENDTRY" ||
+      instruction.opcode.mnemonic === "ENDTRY_L" ||
+      isSimpleConditional(instruction.opcode.mnemonic)
+    ) {
+      if (knownOffsets.has(target)) {
+        labelTargets.add(target);
+      }
+    }
+  }
+
+  return labelTargets;
+}
+
+export function emitLabelIfNeeded(state, offset) {
+  if (!state.labelTargets.has(offset) || state.emittedLabels.has(offset)) {
+    return;
+  }
+  restoreStackAtLabel(state, offset);
+  state.statements.push(`${labelName(offset)}:`);
+  state.emittedLabels.add(offset);
+}
+
+export function tryControlTransferFallback(state, instruction) {
+  const target = jumpTarget(instruction);
+  if (target === null) {
+    return false;
+  }
+
+  const mnemonic = instruction.opcode.mnemonic;
+  if (isSimpleConditional(mnemonic)) {
+    const condition = popConditionForLoop(state.stack, mnemonic);
+    if (condition === null) {
+      return false;
+    }
+    recordStackSnapshot(state, target);
+    // The branch lifter strips label targets outside its prefix; re-register
+    // so a later linear fallback can still resolve this goto.
+    state.labelTargets.add(target);
+    state.statements.push(`if ${condition} { goto ${labelName(target)}; }`);
+    return true;
+  }
+
+  if (mnemonic === "JMP" || mnemonic === "JMP_L") {
+    recordStackSnapshot(state, target);
+    state.labelTargets.add(target);
+    state.statements.push(`goto ${labelName(target)};`);
+    state.stack.length = 0;
+    return true;
+  }
+
+  if (mnemonic === "ENDTRY" || mnemonic === "ENDTRY_L") {
+    state.labelTargets.add(target);
+    state.statements.push(`leave ${labelName(target)};`);
+    state.stack.length = 0;
+    return true;
+  }
+
+  return false;
+}
+
+export function labelName(offset) {
+  return `label_0x${hexOffset(offset)}`;
+}

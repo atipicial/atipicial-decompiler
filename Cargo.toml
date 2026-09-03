@@ -1,0 +1,67 @@
+[package]
+name = "atipicial-decompiler"
+version = "0.12.0"
+edition = "2021"
+authors = ["Jimmy <jimmy@r3e.network>"]
+license = "MIT OR Apache-2.0"
+description = "Atipicial AEF decompiler: parse, disassemble, lift bytecode to high-level pseudocode and C# skeletons, with a CLI, JSON reports, and optional WebAssembly bindings."
+readme = "README.md"
+keywords = ["atipicial", "bytecode", "aef", "decompiler", "smart-contract"]
+categories = ["development-tools", "parser-implementations"]
+repository = "https://github.com/atipicial/atipicial-decompiler"
+homepage = "https://github.com/atipicial/atipicial-decompiler"
+documentation = "https://docs.rs/atipicial-decompiler"
+rust-version = "1.86"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+thiserror = "1.0"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+ripemd = "0.1"
+jsonschema = { version = "0.41", default-features = false, optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.10"
+base64 = "0.21"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:jsonschema"]
+web = [
+    "dep:wasm-bindgen",
+    "dep:serde-wasm-bindgen",
+    "dep:console_error_panic_hook",
+]
+
+[[bin]]
+name = "atipicial-decompiler"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[lib]
+name = "atipicial_decompiler"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[profile.bench]
+inherits = "release"

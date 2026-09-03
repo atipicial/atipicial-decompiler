@@ -1,0 +1,977 @@
+use super::*;
+
+#[test]
+fn disassemble_bytes_returns_instruction_stream_without_rendering() {
+    let aef_bytes = sample_aef();
+    let output = Decompiler::new()
+        .disassemble_bytes(&aef_bytes)
+        .expect("disassembly succeeds");
+
+    assert_eq!(output.instructions.len(), 4);
+    assert!(output.warnings.is_empty());
+    assert_eq!(output.instructions[0].offset, 0);
+    assert_eq!(output.instructions[1].offset, 1);
+}
+
+#[test]
+fn decompile_end_to_end() {
+    let aef_bytes = sample_aef();
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    assert_eq!(decompilation.instructions.len(), 4);
+    assert!(decompilation
+        .pseudocode
+        .as_deref()
+        .expect("pseudocode output")
+        .contains("ADD"));
+    assert!(decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output")
+        .contains("contract AtipicialContract"));
+    assert!(decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output")
+        .contains("fn script_entry()"));
+}
+
+#[test]
+fn decompile_with_manifest_produces_contract_name() {
+    let aef_bytes = sample_aef();
+    let manifest = sample_manifest();
+    let decompilation = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef_bytes, Some(manifest), OutputFormat::All)
+        .expect("decompile succeeds with manifest");
+
+    assert!(decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output")
+        .contains("contract ExampleContract"));
+    assert!(decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output")
+        .contains("fn main() -> int {"));
+}
+
+#[test]
+fn cfg_to_dot_includes_contract_name_and_script_hash_in_label() {
+    // Multi-CFG dumps beaefit from a graph-level label so each
+    // canvas is self-identifying. Without manifest the title falls
+    // back to script hash + instruction count; with manifest the
+    // contract name is prepended.
+    let aef_bytes = sample_aef();
+    let manifest = sample_manifest();
+
+    // With manifest: name + hash + count.
+    let with = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef_bytes, Some(manifest), OutputFormat::Pseudocode)
+        .expect("decompile with manifest");
+    let dot_with = with.cfg_to_dot();
+    assert!(dot_with.starts_with("digraph CFG {\n  label=\""));
+    assert!(dot_with.contains("ExampleContract"), "{dot_with}");
+    assert!(dot_with.contains("instr)"), "{dot_with}");
+    assert!(dot_with.contains("labelloc=\"t\";"), "{dot_with}");
+
+    // Without manifest: hash + count only (no contract name).
+    let without = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile without manifest");
+    let dot_without = without.cfg_to_dot();
+    assert!(dot_without.contains("label=\""), "{dot_without}");
+    assert!(!dot_without.contains("ExampleContract"), "{dot_without}");
+    assert!(dot_without.contains("instr)"), "{dot_without}");
+}
+
+#[test]
+fn decompile_lifts_indirect_calls_without_not_yet_translated_warning() {
+    // Script: CALLA (no operand), CALLT 0x0001, RET
+    let aef_bytes = build_aef(&[0x36, 0x37, 0x01, 0x00, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("calla("),
+        "CALLA should be lifted to an indirect-call statement: {high_level}"
+    );
+    assert!(
+        high_level.contains("callt(0x0001)"),
+        "CALLT should be lifted to an indirect-call statement: {high_level}"
+    );
+    assert!(
+        !high_level.contains("not yet translated"),
+        "indirect calls should no longer emit not-yet-translated placeholders: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_uses_method_token_signature_for_callt_arguments_and_returns() {
+    // Script: PUSH1; CALLT 0x0000; RET
+    // Token: foo(param_count=1, returns=false)
+    let aef_bytes = build_aef_with_single_token(
+        &[0x11, 0x37, 0x00, 0x00, 0x40],
+        [0u8; 20],
+        "foo",
+        1,
+        false,
+        0x0F,
+    );
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("foo(t0);"),
+        "CALLT should consume declared token argument and emit call expression: {high_level}"
+    );
+    assert!(
+        !high_level.contains("let t1 = foo("),
+        "CALLT token marked non-returning should not push a synthetic return temp: {high_level}"
+    );
+    assert!(
+        high_level.contains("return;"),
+        "script entry should end with a bare return after non-returning CALLT: {high_level}"
+    );
+}
+
+#[test]
+fn restricted_native_callt_does_not_emit_a_qualified_label() {
+    let stdlib_hash = [
+        0xC0, 0xEF, 0x39, 0xCE, 0xE0, 0xE4, 0xE9, 0x25, 0xC6, 0xC2, 0xA0, 0x6A, 0x79, 0xE1, 0x44,
+        0x0D, 0xD8, 0x6F, 0xCE, 0xAC,
+    ];
+    let aef_bytes = build_aef_with_single_token(
+        &[0x11, 0x37, 0x00, 0x00, 0x40],
+        stdlib_hash,
+        "Serialize",
+        1,
+        true,
+        0x01,
+    );
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        !high_level.contains("return StdLib::Serialize"),
+        "{high_level}"
+    );
+    assert!(high_level.contains("Serialize(t0);"), "{high_level}");
+}
+
+#[test]
+fn decompile_lifts_relative_calls_without_control_flow_warning() {
+    // Script: CALL +2, CALL_L +5, RET
+    let aef_bytes = build_aef(&[0x34, 0x02, 0x35, 0x05, 0x00, 0x00, 0x00, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("sub_0x0002()"),
+        "CALL should resolve to inferred method name: {high_level}"
+    );
+    assert!(
+        high_level.contains("sub_0x0007()"),
+        "CALL_L should resolve to inferred method name: {high_level}"
+    );
+    assert!(
+        !high_level.contains("control flow not yet lifted"),
+        "relative calls should no longer use control-flow-not-lifted warnings: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_resolves_relative_call_target_to_inferred_method_name() {
+    // Script layout:
+    // 0x0000: CALL +5  (target = 0x0005)
+    // 0x0002: RET
+    // 0x0003..0x0004: NOP padding
+    // 0x0005: INITSLOT 0,0
+    // 0x0008: RET
+    let aef_bytes = build_aef(&[
+        0x34, 0x05, // CALL +5
+        0x40, // RET
+        0x21, 0x21, // NOP x2
+        0x57, 0x00, 0x00, // INITSLOT 0,0
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("sub_0x0005()"),
+        "relative CALL should use inferred callee name when target matches method start: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_relative_call_passes_known_method_arguments() {
+    // Script layout:
+    // 0x0000: PUSH1
+    // 0x0001: CALL +7  (target = 0x0008)
+    // 0x0003: RET
+    // 0x0004..0x0007: NOP padding
+    // 0x0008: INITSLOT 0,1
+    // 0x000B: LDARG0
+    // 0x000C: RET
+    let aef_bytes = build_aef(&[
+        0x11, // PUSH1
+        0x34, 0x07, // CALL +7
+        0x40, // RET
+        0x21, 0x21, 0x21, 0x21, // NOP x4
+        0x57, 0x00, 0x01, // INITSLOT 0,1
+        0x78, // LDARG0
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("sub_0x0008("),
+        "relative CALL should target inferred method call syntax: {high_level}"
+    );
+    assert!(
+        !high_level.contains("sub_0x0008()"),
+        "relative CALL into one-arg method should pass argument expression: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_infers_entry_stack_argument_for_syscall_only_helper() {
+    // Script layout:
+    // 0x0000: PUSHDATA1 "x"
+    // 0x0003: CALL +3 (target = 0x0006)
+    // 0x0005: RET
+    // 0x0006: SYSCALL System.Runtime.Log
+    // 0x000B: RET
+    let aef_bytes = build_aef(&[
+        0x0C, 0x01, b'x', // PUSHDATA1 "x"
+        0x34, 0x03, // CALL +3
+        0x40, // RET
+        0x41, 0xCF, 0xE7, 0x47, 0x96, // SYSCALL System.Runtime.Log
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("fn sub_0x0006(arg0)"),
+        "syscall-only helper should infer one entry-stack argument: {high_level}"
+    );
+    assert!(
+        high_level.contains("syscall(\"System.Runtime.Log\", arg0)"),
+        "syscall-only helper should consume inferred argument instead of ???: {high_level}"
+    );
+    assert!(
+        !decompilation
+            .warnings
+            .iter()
+            .any(|warning| warning
+                .contains("missing syscall argument values for System.Runtime.Log")),
+        "syscall-only helper should not emit missing-argument warnings: {:?}",
+        decompilation.warnings
+    );
+}
+
+#[test]
+fn decompile_lifts_unconditional_jumps_without_control_flow_warning() {
+    // Script: JMP +2 (to JMP_L), JMP_L +5 (to RET), RET
+    let aef_bytes = build_aef(&[0x22, 0x02, 0x23, 0x05, 0x00, 0x00, 0x00, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    // Fallthrough gotos (JMP to next instruction) are optimised away, and
+    // the orphaned-label-removal pass strips the now-unreferenced label
+    // anchors. The key guarantee is the absence of control-flow warnings.
+    assert!(
+        !high_level.contains("control flow not yet lifted"),
+        "unconditional jumps should no longer emit control-flow-not-lifted warnings: {high_level}"
+    );
+    assert!(
+        !high_level.contains("label_0x0002:"),
+        "fallthrough JMP target should be removed as orphan: {high_level}"
+    );
+    assert!(
+        !high_level.contains("label_0x0007:"),
+        "fallthrough JMP_L target should be removed as orphan: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_manifestless_entry_surfaces_initslot_args() {
+    // INITSLOT 2 locals, 1 arg; LDARG0; STLOC0; LDLOC0; RET. Without a
+    // manifest the entry method's signature should still surface the
+    // INITSLOT-declared argument (`arg0`), so the body's `let loc0 =
+    // arg0;` references a parameter that actually appears in the
+    // signature — instead of the bare `fn script_entry()` Rust used to
+    // emit. Stack-depth-only inference (no INITSLOT) still produces a
+    // bare `fn script_entry()` so the missing-syscall-argument warning
+    // remains visible.
+    let script = [0x57, 0x02, 0x01, 0x78, 0x70, 0x68, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("fn script_entry(arg0)"),
+        "manifest-less script_entry should expose INITSLOT-declared args: {high_level}"
+    );
+    assert!(
+        high_level.contains("let loc0 = arg0;"),
+        "body should reference the same arg label as the signature: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_known_syscall_drops_redundant_hash_comment_in_clean_mode() {
+    // Script: SYSCALL System.Runtime.GetTime, DROP, RET. The known syscall
+    // is fully identified by its name in the call expression, so the
+    // trailing `// 0x0388C3B7` comment is just noise — clean mode should
+    // strip it. Trace mode keeps it as a debug aid.
+    let script = [0x41, 0xB7, 0xC3, 0x88, 0x03, 0x75, 0x40];
+    let aef_bytes = build_aef(&script);
+
+    let trace = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds (trace)");
+    let trace_high = trace
+        .high_level
+        .as_deref()
+        .expect("high-level output (trace)");
+    assert!(
+        trace_high.contains("// 0x0388C3B7"),
+        "trace mode should keep the syscall hash comment: {trace_high}"
+    );
+
+    let clean = Decompiler::new()
+        .with_trace_comments(false)
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds (clean)");
+    let clean_high = clean
+        .high_level
+        .as_deref()
+        .expect("high-level output (clean)");
+    assert!(
+        !clean_high.contains("// 0x0388C3B7"),
+        "clean mode should drop the redundant syscall hash comment: {clean_high}"
+    );
+    assert!(
+        clean_high.contains("System.Runtime.GetTime"),
+        "syscall name must still appear in the call expression: {clean_high}"
+    );
+}
+
+#[test]
+fn decompile_unknown_syscall_keeps_unknown_annotation() {
+    // SYSCALL with an unrecognised hash — the `// warning: unknown
+    // syscall 0xHASH` annotation is the only signal of the situation,
+    // so it stays in every mode (cross-port parity with JS leading-
+    // comment style; iteration 97 unified all warn() callers on this
+    // prefix).
+    let script = [0x41, 0xEF, 0xBE, 0xAD, 0xDE, 0x75, 0x40]; // 0xDEADBEEF
+    let aef_bytes = build_aef(&script);
+
+    for emit_trace in [true, false] {
+        let decompilation = Decompiler::new()
+            .with_trace_comments(emit_trace)
+            .decompile_bytes(&aef_bytes)
+            .expect("decompile succeeds");
+        let high = decompilation
+            .high_level
+            .as_deref()
+            .expect("high-level output");
+        assert!(
+            high.contains("// warning: unknown syscall 0xDEADBEEF"),
+            "unknown-syscall annotation must always be emitted with the JS-style \
+             `// warning:` prefix (trace={emit_trace}): {high}"
+        );
+        assert!(
+            high.contains("0xDEADBEEF"),
+            "unknown-syscall hash must appear in the call expression itself: {high}"
+        );
+        // The structured warnings array carries the same hazard so a
+        // programmatic caller (CI, IDE integration) doesn't have to
+        // grep the rendered source. Parity with the JS port.
+        assert!(
+            decompilation
+                .warnings
+                .iter()
+                .any(|w| w.contains("unknown syscall 0xDEADBEEF")),
+            "unknown-syscall warning must be surfaced via the warnings array (trace={emit_trace}): {:?}",
+            decompilation.warnings,
+        );
+    }
+}
+
+#[test]
+fn decompile_lifts_endtry_transfers_without_control_flow_warning() {
+    // Script: ENDTRY +2 (to ENDTRY_L), ENDTRY_L +5 (to RET), RET
+    let aef_bytes = build_aef(&[0x3D, 0x02, 0x3E, 0x05, 0x00, 0x00, 0x00, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    // Both ENDTRYs target the immediately following instruction, so
+    // `eliminate_fallthrough_gotos` collapses the `leave label_X;` lines
+    // and `remove_orphaned_labels` strips the now-unreferenced anchors.
+    // The key guarantee is the absence of control-flow warnings — and the
+    // output should be clean, idiomatic high-level code with no dead
+    // transfer plumbing.
+    assert!(
+        !high_level.contains("control flow not yet lifted"),
+        "ENDTRY opcodes should no longer emit control-flow-not-lifted warnings: {high_level}"
+    );
+    assert!(
+        !high_level.contains("leave label_"),
+        "fallthrough ENDTRY transfers should be eliminated: {high_level}"
+    );
+    assert!(
+        !high_level.contains("label_0x0002:"),
+        "fallthrough ENDTRY target should be removed as orphan: {high_level}"
+    );
+    assert!(
+        !high_level.contains("label_0x0007:"),
+        "fallthrough ENDTRY_L target should be removed as orphan: {high_level}"
+    );
+    assert!(
+        high_level.contains("return;"),
+        "method body should still emit the trailing return: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_uses_label_style_for_unresolved_jump_targets() {
+    // Script: JMP +5 (to 0x0005, no decoded instruction there), RET
+    let aef_bytes = build_aef(&[0x22, 0x05, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("goto label_0x0005;"),
+        "unresolved jump target should still use label-style transfer naming: {high_level}"
+    );
+    assert!(
+        !high_level.contains("goto_0x0005();"),
+        "legacy function-style jump placeholder should not be emitted: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_uses_label_style_for_unresolved_endtry_targets() {
+    // Script: ENDTRY +5 (to 0x0005, no decoded instruction there), RET
+    let aef_bytes = build_aef(&[0x3D, 0x05, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("leave label_0x0005;"),
+        "unresolved endtry target should still use label-style transfer naming: {high_level}"
+    );
+    assert!(
+        !high_level.contains("leave_0x0005();"),
+        "legacy function-style endtry placeholder should not be emitted: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_calla_with_stack_setup() {
+    // Script: PUSH1 (push a value), PUSH0 (push pointer placeholder), CALLA, RET
+    // Tests that CALLA consumes a pointer from the stack and emits an indirect call.
+    let aef_bytes = build_aef(&[0x11, 0x10, 0x36, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("calla("),
+        "CALLA should produce an indirect call expression: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_resolves_pusha_calla_to_internal_call_placeholder() {
+    // Script layout:
+    // 0x0000: PUSHA +10  (target = 0x000A)
+    // 0x0005: CALLA
+    // 0x0006: RET
+    // 0x0007..0x0009: NOP padding
+    // 0x000A: INITSLOT 0,0
+    // 0x000D: RET
+    let aef_bytes = build_aef(&[
+        0x0A, 0x0A, 0x00, 0x00, 0x00, // PUSHA +10
+        0x36, // CALLA
+        0x40, // RET
+        0x21, 0x21, 0x21, // NOP x3
+        0x57, 0x00, 0x00, // INITSLOT 0,0
+        0x40, // RET
+    ]);
+
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("sub_0x000A()"),
+        "PUSHA+CALLA should resolve to the inferred method name when available: {high_level}"
+    );
+    assert!(
+        !high_level.contains("calla("),
+        "resolved PUSHA+CALLA should not remain as generic indirect call: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_resolves_local_pointer_flow_into_calla() {
+    // Script layout:
+    // 0x0000: PUSHA +9  (target = 0x0009)
+    // 0x0005: STLOC0
+    // 0x0006: LDLOC0
+    // 0x0007: CALLA
+    // 0x0008: RET
+    // 0x0009: INITSLOT 0,0
+    // 0x000C: RET
+    let aef_bytes = build_aef(&[
+        0x0A, 0x09, 0x00, 0x00, 0x00, // PUSHA +9
+        0x70, // STLOC0
+        0x68, // LDLOC0
+        0x36, // CALLA
+        0x40, // RET
+        0x57, 0x00, 0x00, // INITSLOT 0,0
+        0x40, // RET
+    ]);
+
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("sub_0x0009()"),
+        "local pointer flow should resolve CALLA to inferred method name: {high_level}"
+    );
+    assert!(
+        !high_level.contains("calla(loc0)"),
+        "resolved local pointer flow should not remain generic CALLA: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_resolves_static_pointer_flow_into_calla() {
+    // Script layout:
+    // 0x0000: PUSHA +9  (target = 0x0009)
+    // 0x0005: STSFLD0
+    // 0x0006: LDSFLD0
+    // 0x0007: CALLA
+    // 0x0008: RET
+    // 0x0009: INITSLOT 0,0
+    // 0x000C: RET
+    let aef_bytes = build_aef(&[
+        0x0A, 0x09, 0x00, 0x00, 0x00, // PUSHA +9
+        0x60, // STSFLD0
+        0x58, // LDSFLD0
+        0x36, // CALLA
+        0x40, // RET
+        0x57, 0x00, 0x00, // INITSLOT 0,0
+        0x40, // RET
+    ]);
+
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("sub_0x0009()"),
+        "static pointer flow should resolve CALLA to inferred method name: {high_level}"
+    );
+    assert!(
+        !high_level.contains("calla(static0)"),
+        "resolved static pointer flow should not remain generic CALLA: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_multiple_sequential_calls() {
+    // Script: CALL +2, CALL +0, RET, RET
+    // Two sequential CALL instructions targeting different offsets.
+    let aef_bytes = build_aef(&[0x34, 0x02, 0x34, 0x00, 0x40, 0x40]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("sub_0x") || high_level.contains("call_"),
+        "sequential CALL instructions should each produce a call expression: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_nested_loop_in_if() {
+    // Script layout (offsets in brackets):
+    //   [0] PUSH0          -- condition for outer if
+    //   [1] JMPIFNOT +8    -- target = 9 (RET), outer if
+    //   [3] PUSH0          -- condition for while loop
+    //   [4] JMPIFNOT +5    -- target = 9 (RET), loop exit
+    //   [6] NOP            -- loop body
+    //   [7] JMP -4         -- back-edge to [3]
+    //   [9] RET
+    let aef_bytes = build_aef(&[
+        0x10, // PUSH0
+        0x26, 0x08, // JMPIFNOT +8
+        0x10, // PUSH0
+        0x26, 0x05, // JMPIFNOT +5
+        0x21, // NOP
+        0x22, 0xFC, // JMP -4
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("if"),
+        "outer branch should produce an if block: {high_level}"
+    );
+    assert!(
+        high_level.contains("while"),
+        "inner loop should produce a while block: {high_level}"
+    );
+    assert!(
+        !high_level.contains("not yet translated"),
+        "nested loop-in-if should not emit not-yet-translated placeholders: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_try_in_loop() {
+    // Script layout (offsets in brackets):
+    //   [0]  PUSH0            -- condition for while loop
+    //   [1]  JMPIFNOT +12     -- target = 13 (RET), loop exit
+    //   [3]  TRY (catch=+7, finally=0) -- catch at 10, no finally
+    //   [6]  NOP              -- try body
+    //   [7]  ENDTRY +6        -- leave to 13 (RET)
+    //   [9]  NOP              -- padding
+    //   [10] ENDFINALLY       -- catch handler
+    //   [11] JMP -11          -- back-edge to [0]
+    //   [13] RET
+    let aef_bytes = build_aef(&[
+        0x10, // PUSH0
+        0x26, 0x0C, // JMPIFNOT +12
+        0x3B, 0x07, 0x00, // TRY catch=+7, finally=0
+        0x21, // NOP
+        0x3D, 0x06, // ENDTRY +6
+        0x21, // NOP
+        0x3F, // ENDFINALLY
+        0x22, 0xF5, // JMP -11
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("try"),
+        "try block should be emitted inside the loop: {high_level}"
+    );
+    assert!(
+        high_level.contains("while") || high_level.contains("loop"),
+        "enclosing loop should be recognized: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_nested_if_else() {
+    // Script layout (offsets in brackets):
+    //   [0]  PUSH0          -- condition for outer if
+    //   [1]  JMPIFNOT +10   -- target = 11 (RET), outer if
+    //   [3]  PUSH0          -- condition for inner if
+    //   [4]  JMPIFNOT +5    -- target = 9 (inner else body)
+    //   [6]  NOP            -- inner if-true body
+    //   [7]  JMP +4         -- skip inner else, target = 11 (RET)
+    //   [9]  NOP            -- inner else body
+    //   [10] NOP            -- padding
+    //   [11] RET
+    let aef_bytes = build_aef(&[
+        0x10, // PUSH0
+        0x26, 0x0A, // JMPIFNOT +10
+        0x10, // PUSH0
+        0x26, 0x05, // JMPIFNOT +5
+        0x21, // NOP
+        0x22, 0x04, // JMP +4
+        0x21, // NOP
+        0x21, // NOP
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("if"),
+        "nested if structure should be present: {high_level}"
+    );
+    assert!(
+        high_level.contains("let t1"),
+        "inner variable should still be present after empty-if removal: {high_level}"
+    );
+}
+
+#[test]
+fn decompile_all_comparison_jumps() {
+    // Script layout: six comparison jumps (JMPEQ, JMPNE, JMPGT, JMPGE, JMPLT, JMPLE),
+    // each preceded by PUSH0+PUSH1 to supply two stack operands, with a NOP filler
+    // between each block. Each jump targets the next PUSH0 (or RET for the last).
+    //
+    //   [0]  PUSH0           [1]  PUSH1
+    //   [2]  JMPEQ +1        target = 5
+    //   [4]  NOP
+    //   [5]  PUSH0           [6]  PUSH1
+    //   [7]  JMPNE +1        target = 10
+    //   [9]  NOP
+    //   [10] PUSH0           [11] PUSH1
+    //   [12] JMPGT +1        target = 15
+    //   [14] NOP
+    //   [15] PUSH0           [16] PUSH1
+    //   [17] JMPGE +1        target = 20
+    //   [19] NOP
+    //   [20] PUSH0           [21] PUSH1
+    //   [22] JMPLT +1        target = 25
+    //   [24] NOP
+    //   [25] PUSH0           [26] PUSH1
+    //   [27] JMPLE +1        target = 30
+    //   [29] NOP
+    //   [30] RET
+    let aef_bytes = build_aef(&[
+        0x10, 0x11, 0x28, 0x01, 0x21, // PUSH0, PUSH1, JMPEQ +1, NOP
+        0x10, 0x11, 0x2A, 0x01, 0x21, // PUSH0, PUSH1, JMPNE +1, NOP
+        0x10, 0x11, 0x2C, 0x01, 0x21, // PUSH0, PUSH1, JMPGT +1, NOP
+        0x10, 0x11, 0x2E, 0x01, 0x21, // PUSH0, PUSH1, JMPGE +1, NOP
+        0x10, 0x11, 0x30, 0x01, 0x21, // PUSH0, PUSH1, JMPLT +1, NOP
+        0x10, 0x11, 0x32, 0x01, 0x21, // PUSH0, PUSH1, JMPLE +1, NOP
+        0x40, // RET
+    ]);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    for op in ["==", "!=", ">", ">=", "<", "<="] {
+        assert!(
+            high_level.contains(op),
+            "comparison operator {op} should appear in output: {high_level}"
+        );
+    }
+    assert!(
+        !high_level.contains("not yet translated"),
+        "comparison jumps should not emit not-yet-translated placeholders: {high_level}"
+    );
+}
+
+#[test]
+fn packmap_pops_key_value_pairs_and_renders_entries() {
+    // Script: PUSH4 ; PUSH3 ; PUSH2 ; PUSH1 ; PUSH2 (count) ; PACKMAP ; RET
+    // PACKMAP pops 2n+1 items (OpCode.cs): count=2, then key=1, value=2,
+    // key=3, value=4. The old code popped only n items, dropping half the
+    // map and leaving stale entries on the simulated stack.
+    let aef_bytes = build_aef(&[0x14, 0x13, 0x12, 0x11, 0x12, 0xBE, 0x40]);
+    let decompilation = Decompiler::new()
+        .with_inline_single_use_temps(true)
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("Map(1: 2, 3: 4)"),
+        "PACKMAP should render key/value pairs in pop order: {high_level}"
+    );
+}
+
+#[test]
+fn huge_pack_count_terminates_quickly() {
+    // Script: PUSHINT64 i64::MAX ; PACK ; RET
+    // The count literal is attacker-controlled; both the high-level
+    // emitter and the type-inference pass must clamp their drain loops
+    // (this hung at 100% CPU before the clamp in analysis/types.rs).
+    let mut script = vec![0x03];
+    script.extend_from_slice(&i64::MAX.to_le_bytes());
+    script.extend_from_slice(&[0xC0, 0x40]); // PACK ; RET
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds despite the pathological count");
+    assert!(decompilation.high_level.is_some());
+}
+
+#[test]
+fn huge_packmap_count_terminates_quickly() {
+    let mut script = vec![0x03];
+    script.extend_from_slice(&i64::MAX.to_le_bytes());
+    script.extend_from_slice(&[0xBE, 0x40]); // PACKMAP ; RET
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds despite the pathological count");
+    assert!(decompilation.high_level.is_some());
+}
+
+#[test]
+fn invalid_type_bytes_render_as_raw_hex() {
+    // Script: PUSH1 ; NEWARRAY_T 0x99 ; DROP ; PUSH1 ; ISTYPE 0x99 ; RET
+    // 0x99 is not a valid StackItemType: both fallbacks surface the raw
+    // byte (uppercase hex) instead of dropping it or emitting an
+    // unquoted `unknown` placeholder.
+    let aef_bytes = build_aef(&[0x11, 0xC4, 0x99, 0x45, 0x11, 0xD9, 0x99, 0x40]);
+    let decompilation = Decompiler::new()
+        .with_inline_single_use_temps(true)
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("new_array_t(1, 0x99)"),
+        "NEWARRAY_T fallback should keep the raw type byte: {high_level}"
+    );
+    assert!(
+        high_level.contains("is_type(1, 0x99)"),
+        "ISTYPE fallback should keep the raw type byte: {high_level}"
+    );
+}
+
+#[test]
+fn oversized_method_hits_high_level_lifting_cap() {
+    // A method with more instructions than the high-level lifting cap must fall
+    // back to a note instead of running the worst-case O(n²) lift passes — a
+    // crafted in-cap AEF (many crossing jumps) would otherwise hang the
+    // decompiler. The disassembly remains available separately.
+    let mut script = Vec::new();
+    for _ in 0..20_000 {
+        script.extend_from_slice(&[0x11, 0x24, 0x05]); // PUSH1 ; JMPIF +5 (crossing)
+    }
+    script.push(0x40); // RET
+    let aef_bytes = build_aef(&script);
+    let result = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+    let high_level = result.high_level.as_deref().expect("high-level output");
+    assert!(
+        high_level.contains("too large for high-level lifting"),
+        "oversized method should fall back to the cap note: {high_level}"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("exceeds the high-level lifting limit")),
+        "should surface a skip warning: {:?}",
+        result.warnings
+    );
+}

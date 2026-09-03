@@ -1,0 +1,318 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # beta and nightly run for early warning but must not gate the build: their
+    # clippy lint set changes with every toolchain release, so `-D warnings`
+    # there fails on forward-looking lints unrelated to this crate. Only stable
+    # (plus the separate MSRV job) gates. fail-fast is disabled so a beta/nightly
+    # failure never cancels the stable run.
+    continue-on-error: ${{ matrix.rust != 'stable' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - stable
+          - beta
+          - nightly
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        run: cargo test --verbose
+      - name: Run tests (no default features)
+        if: matrix.rust == 'stable'
+        run: cargo test --no-default-features --verbose
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run clippy (no default features)
+        if: matrix.rust == 'stable'
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Build docs
+        if: matrix.rust == 'stable'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.86.0
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        run: cargo test --verbose
+      - name: Run tests (no default features)
+        run: cargo test --no-default-features --verbose
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run benchmarks
+        run: cargo bench
+
+  deny:
+    name: Cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Run cargo deny
+        run: cargo deny check
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Security audit
+        uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  artifact-sweep:
+    name: Artifact sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run artifact sweep
+        run: bash tools/ci/artifact_sweep.sh
+
+  devpack-corpus:
+    name: Pinned devpack v3.10.0 corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out atipicial-devpack-dotnet v3.10.0
+        uses: actions/checkout@v4
+        with:
+          repository: atipicial-project/atipicial-devpack-dotnet
+          ref: v3.10.0
+          path: atipicial-devpack-dotnet
+      - name: Verify pinned devpack revision
+        run: |
+          expected_sha="5b0b63880b6201ae3f974cc845e93a90462d8043"
+          actual_sha="$(git -C atipicial-devpack-dotnet rev-parse HEAD)"
+          actual_tag="$(git -C atipicial-devpack-dotnet describe --tags --exact-match HEAD)"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tag" = "v3.10.0"
+      - name: Test devpack extractor
+        run: python3 -m unittest discover -s tools/tests -p '*_tests.py'
+      - name: Extract pinned corpus
+        run: |
+          python3 tools/extract_devpack_artifacts.py \
+            --devpack-root atipicial-devpack-dotnet \
+            --output-dir TestingArtifacts/devpack \
+            --expected-count 103 \
+            --strict \
+            --clean
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-devpack-v3.10.0-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run pinned corpus sweep
+        run: bash tools/ci/artifact_sweep.sh
+      - name: Restore pinned Atipicial C# framework assembly
+        run: |
+          dotnet new classlib --framework net10.0 --output .ci/roslyn --no-restore
+          dotnet add .ci/roslyn package Atipicial.SmartContract.Framework --version 3.10.0
+          dotnet restore .ci/roslyn --nologo --verbosity quiet
+          framework_dll="$(find "$HOME/.nuget/packages/atipicial.smartcontract.framework/3.10.0/lib/net10.0" -name Atipicial.SmartContract.Framework.dll -print -quit)"
+          test -n "$framework_dll"
+          {
+            echo "ATC_SMARTCONTRACT_FRAMEWORK_DLL=$framework_dll"
+            echo "ATC_CSHARP_TARGET_FRAMEWORK=net10.0"
+            echo "ATC_CSHARP_CORPUS_DIR=$GITHUB_WORKSPACE/TestingArtifacts/devpack"
+          } >> "$GITHUB_ENV"
+      - name: Compile pinned Rust C# corpus with Roslyn
+        run: cargo test --test csharp_compile -- --nocapture
+      - name: Compile pinned JS C# corpus with Roslyn
+        working-directory: js
+        run: node --test --test-name-pattern "pinned JS-generated C# corpus" test/*.test.mjs
+      - name: Build release binary for differential parity gate
+        # js/test/differential.test.mjs resolves RUST_BIN to
+        # target/release/atipicial-decompiler and skips (vacuous pass) when it is
+        # absent. The sweep above only exercises the dev/test profiles, so
+        # build the release profile explicitly.
+        run: cargo build --release --features cli --bin atipicial-decompiler
+      - name: Run Rust/JS differential parity gate
+        # Recurses TestingArtifacts/ (103 pinned devpack contracts + the 7
+        # committed edgecase fixtures) and asserts disasm, high-level, and the
+        # analysis blocks (call_graph/xrefs/types/patterns) match byte for byte.
+        working-directory: js
+        run: node --test test/differential.test.mjs
+
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: atipicial-decompiler-${{ matrix.os }}
+          path: target/release/atipicial-decompiler*
+
+  js-package:
+    name: JS package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build release binary for differential parity gates
+        # js/test/differential.test.mjs resolves RUST_BIN to
+        # target/release/atipicial-decompiler and skips (vacuous pass) when it is
+        # absent. Build it here so the Rust↔JS parity assertions actually run.
+        run: cargo build --release
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Run JS package tests
+        working-directory: js
+        run: npm test
+
+  web-package:
+    name: Web package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Install wasm-bindgen-cli
+        # Match the wasm-bindgen crate version in Cargo.lock, otherwise
+        # `wasm-pack --mode no-install` fails with "Not able to find or install
+        # a local wasm-bindgen". Derive it from the lockfile so it cannot drift.
+        run: |
+          version="$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          echo "Installing wasm-bindgen-cli ${version} (matched to Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "${version}" --locked
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Run web package tests
+        working-directory: web
+        run: npm test
+      - name: Verify web package version sync
+        working-directory: web
+        run: npm run version:check
+      - name: Verify web package tarball contents
+        working-directory: web
+        run: npm run verify:pack

@@ -1,0 +1,119 @@
+use super::super::super::*;
+
+#[test]
+fn high_level_pick_of_literal_skips_temp() {
+    // Script: PUSH1, PUSH2, PUSH1 (index), PICK, RET
+    // PICK duplicates a simple literal (`1`), so — like DUP/OVER/TUCK —
+    // it skips the temp materialization and just copies the value. No
+    // `// pick stack[N]` comment is emitted (parity with the JS port's
+    // `materialiseStackTopForDup`).
+    let script = [0x11, 0x12, 0x11, 0x4D, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        !high_level.contains("pick stack["),
+        "literal PICK should skip the temp/comment: {high_level}"
+    );
+    assert!(
+        !high_level.contains("insufficient values on stack for PICK"),
+        "literal PICK must not underflow: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_pick_of_side_effecting_value_materializes_temp() {
+    // Script: SYSCALL(System.Runtime.GetTime) ; PUSH0 (index) ; PICK ;
+    //         ADD ; RET
+    // PICK duplicates the syscall result (a side-effecting expression).
+    // It must be hoisted into a temp so the call is evaluated once and
+    // referenced twice — not string-copied (which would emit two
+    // syscalls).
+    let script = [
+        0x41, 0xB7, 0xC3, 0x88, 0x03, // SYSCALL System.Runtime.GetTime
+        0x10, // PUSH0 (index)
+        0x4D, // PICK
+        0x9E, // ADD
+        0x40, // RET
+    ];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    let syscall_occurrences = high_level.matches("System.Runtime.GetTime").count();
+    assert_eq!(
+        syscall_occurrences, 1,
+        "PICK of a syscall result must evaluate it once (materialized temp): {high_level}"
+    );
+}
+
+#[test]
+fn high_level_lifts_xdrop_with_literal_index() {
+    // Script: PUSH1, PUSH2, PUSH3, PUSH1 (index), XDROP, RET
+    // XDROP uses the literal index (1) to remove the second item from the
+    // top. The lifted statement keeps the post-XDROP stack right (PUSH3
+    // bubbles to the top) — the informational `// xdrop stack[N]`
+    // comment that used to surface here was just noise duplicating
+    // what the surrounding statements already convey, and `strip_stack_comments`
+    // now drops it for parity with the JS port.
+    let script = [0x11, 0x12, 0x13, 0x11, 0x48, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("return t2;") || high_level.contains("return 3;"),
+        "XDROP should preserve the top value (PUSH3): {high_level}"
+    );
+    assert!(
+        !high_level.contains("// xdrop stack"),
+        "informational xdrop comment should be stripped: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_pick_preserves_packed_shape_for_unpack_reverse4() {
+    // Script:
+    //   INITSLOT 1,0
+    //   PUSH1; PUSH2; PUSH2; PACK; STLOC0
+    //   PUSH3; LDLOC0; PUSH0; PICK; UNPACK; DROP; REVERSE4; RET
+    let script = [
+        0x57, 0x01, 0x00, // INITSLOT 1 local, 0 args
+        0x11, 0x12, 0x12, 0xC0, 0x70, // PUSH1; PUSH2; PUSH2; PACK; STLOC0
+        0x13, 0x68, 0x10, 0x4D, 0xC1, 0x45, 0x54,
+        0x40, // PUSH3; LDLOC0; PUSH0; PICK; UNPACK; DROP; REVERSE4; RET
+    ];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    // The previous "reverse top 4 stack values" check was VM
+    // narration — stripped from clean output now. The substantive
+    // check below ensures REVERSE4 didn't underflow after the
+    // PICK→UNPACK chain.
+    assert!(
+        !high_level.contains("insufficient values on stack for REVERSE4"),
+        "PICK should preserve packed shape metadata for downstream UNPACK stack modeling: {high_level}"
+    );
+}

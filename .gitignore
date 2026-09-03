@@ -1,0 +1,86 @@
+# Rust build artifacts
+/target/
+/pkg/
+web/dist/
+web/node_modules/
+web/pkg/
+web/*.tgz
+TestingArtifacts/decompiled/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test outputs and logs
+*.log
+*.tmp
+/tmp/
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Debug files
+*.pdb
+
+# Generated outputs (keep structure but ignore temporary files)
+decompiled_contracts/*/stdout.log
+decompiled_contracts/*/stderr.log
+decompiled_contracts/*/command.log
+decompiled_contracts/*/*.error
+
+# Temporary analysis files
+debug_*.py
+analyze_*.py
+manual_*.py
+fix_*.py
+test_*.py
+*.json.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+*.orig
+
+# Editor files
+*.sublime-*
+*.code-workspace
+
+# Local configuration
+local_config.toml
+.env
+.serena/
+
+.claude/
+
+# Vendored atipicial_csharp build outputs
+atipicial_csharp/**/bin/
+atipicial_csharp/**/obj/
+
+# Fuzz workspace artifacts
+/fuzz/Cargo.lock
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+.omx/
+
+# Local devpack corpus scaffolding (CI regenerates these at the pinned revision)
+/.ci/
+/.devpack-v310/
+/TestingArtifacts/devpack/
+
+# Agent workspace data
+.workbuddy/

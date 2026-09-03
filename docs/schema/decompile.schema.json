@@ -1,0 +1,489 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/atipicial/atipicial-decompiler/docs/schema/decompile.schema.json",
+  "title": "atipicial-decompiler decompile report",
+  "type": "object",
+  "required": [
+    "file",
+    "compiler",
+    "script_hash_le",
+    "script_hash_be",
+    "csharp",
+    "high_level",
+    "pseudocode",
+    "instructions",
+    "method_tokens",
+    "warnings"
+  ],
+  "properties": {
+    "file": {"type": "string"},
+    "manifest_path": {"type": ["string", "null"]},
+    "compiler": {"type": "string"},
+    "source": {"type": ["string", "null"]},
+    "script_hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "script_hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "csharp": {"type": "string"},
+    "high_level": {"type": "string"},
+    "pseudocode": {"type": "string"},
+    "instructions": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/instruction"}
+    },
+    "method_tokens": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/methodToken"}
+    },
+    "manifest": {
+      "oneOf": [
+        {"$ref": "#/definitions/manifestSummary"},
+        {"type": "null"}
+      ]
+    },
+    "analysis": {"$ref": "#/definitions/analysisReport"},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "definitions": {
+    "analysisReport": {
+      "type": "object",
+      "required": ["call_graph", "method_contracts", "xrefs", "types"],
+      "properties": {
+        "call_graph": {"$ref": "#/definitions/callGraph"},
+        "method_contracts": {"$ref": "#/definitions/methodContracts"},
+        "xrefs": {"$ref": "#/definitions/xrefs"},
+        "types": {"$ref": "#/definitions/typeInfo"}
+      }
+    },
+    "methodContracts": {
+      "type": "object",
+      "required": ["methods"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/methodContract"}
+        }
+      }
+    },
+    "methodContract": {
+      "type": "object",
+      "required": ["method", "argument_count", "return_behavior", "may_return"],
+      "properties": {
+        "method": {"$ref": "#/definitions/methodRef"},
+        "argument_count": {"type": "integer", "minimum": 0},
+        "return_behavior": {"enum": ["value", "void", "unknown"]},
+        "may_return": {"type": "boolean"}
+      }
+    },
+    "methodRef": {
+      "type": "object",
+      "required": ["offset", "name"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"}
+      }
+    },
+    "callGraph": {
+      "type": "object",
+      "required": ["methods", "edges"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/methodRef"}
+        },
+        "edges": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/callEdge"}
+        }
+      }
+    },
+    "callEdge": {
+      "type": "object",
+      "required": ["caller", "call_offset", "opcode", "target"],
+      "properties": {
+        "caller": {"$ref": "#/definitions/methodRef"},
+        "call_offset": {"type": "integer", "minimum": 0},
+        "opcode": {"type": "string"},
+        "target": {"$ref": "#/definitions/callTarget"}
+      }
+    },
+    "callTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["Internal"],
+          "properties": {
+            "Internal": {
+              "type": "object",
+              "required": ["method"],
+              "properties": {"method": {"$ref": "#/definitions/methodRef"}}
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["MethodToken"],
+          "properties": {
+            "MethodToken": {
+              "type": "object",
+              "required": [
+                "index",
+                "hash_le",
+                "hash_be",
+                "method",
+                "parameters_count",
+                "has_return_value",
+                "call_flags"
+              ],
+              "properties": {
+                "index": {"type": "integer", "minimum": 0},
+                "hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+                "hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+                "method": {"type": "string"},
+                "parameters_count": {"type": "integer", "minimum": 0},
+                "has_return_value": {"type": "boolean"},
+                "call_flags": {"type": "integer", "minimum": 0, "maximum": 255}
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["Syscall"],
+          "properties": {
+            "Syscall": {
+              "type": "object",
+              "required": ["hash", "returns_value"],
+              "properties": {
+                "hash": {"type": "integer", "minimum": 0},
+                "name": {"type": ["string", "null"]},
+                "returns_value": {"type": "boolean"}
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["Indirect"],
+          "properties": {
+            "Indirect": {
+              "type": "object",
+              "required": ["opcode"],
+              "properties": {
+                "opcode": {"type": "string"},
+                "operand": {"type": ["integer", "null"], "minimum": 0}
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["UnresolvedInternal"],
+          "properties": {
+            "UnresolvedInternal": {
+              "type": "object",
+              "required": ["target"],
+              "properties": {"target": {"type": "integer"}}
+            }
+          }
+        }
+      ]
+    },
+    "xrefs": {
+      "type": "object",
+      "required": ["methods"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/methodXrefs"}
+        }
+      }
+    },
+    "methodXrefs": {
+      "type": "object",
+      "required": ["method", "locals", "arguments", "statics"],
+      "properties": {
+        "method": {"$ref": "#/definitions/methodRef"},
+        "locals": {"type": "array", "items": {"$ref": "#/definitions/slotXref"}},
+        "arguments": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/slotXref"}
+        },
+        "statics": {"type": "array", "items": {"$ref": "#/definitions/slotXref"}}
+      }
+    },
+    "slotXref": {
+      "type": "object",
+      "required": ["index", "reads", "writes"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "reads": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "writes": {"type": "array", "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "valueType": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "any",
+        "null",
+        "bool",
+        "integer",
+        "bytestring",
+        "buffer",
+        "array",
+        "struct",
+        "map",
+        "interopinterface",
+        "pointer"
+      ]
+    },
+    "typeInfo": {
+      "type": "object",
+      "required": ["methods", "statics"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/methodTypes"}
+        },
+        "statics": {"type": "array", "items": {"$ref": "#/definitions/valueType"}}
+      }
+    },
+    "methodTypes": {
+      "type": "object",
+      "required": ["method", "arguments", "locals"],
+      "properties": {
+        "method": {"$ref": "#/definitions/methodRef"},
+        "arguments": {"type": "array", "items": {"$ref": "#/definitions/valueType"}},
+        "locals": {"type": "array", "items": {"$ref": "#/definitions/valueType"}}
+      }
+    },
+    "instruction": {
+      "type": "object",
+      "required": ["offset", "opcode"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "opcode": {"type": "string"},
+        "operand": {"type": ["string", "null"]},
+        "operand_kind": {"type": ["string", "null"]},
+        "operand_value": {
+          "oneOf": [
+            {"$ref": "#/definitions/operandValue"},
+            {"type": "null"}
+          ]
+        },
+        "returns_value": {"type": ["boolean", "null"]}
+      }
+    },
+    "operandValue": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "I8",
+            "I16",
+            "I32",
+            "I64",
+            "U8",
+            "U16",
+            "U32",
+            "Bool",
+            "Bytes",
+            "Jump",
+            "Jump32",
+            "Syscall",
+            "Null"
+          ]
+        },
+        "value": {
+          "type": ["integer", "string", "boolean"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "methodToken": {
+      "type": "object",
+      "required": ["method", "hash_le", "hash_be", "parameters", "returns", "call_flags", "call_flag_labels", "returns_value"],
+      "properties": {
+        "method": {"type": "string"},
+        "hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "parameters": {"type": "integer", "minimum": 0},
+        "returns": {"type": "boolean"},
+        "call_flags": {"type": "integer", "minimum": 0, "maximum": 255},
+        "call_flag_labels": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "returns_value": {"type": "boolean"},
+        "native_contract": {
+          "oneOf": [
+            {"$ref": "#/definitions/nativeContract"},
+            {"type": "null"}
+          ]
+        },
+        "warning": {"type": ["string", "null"]}
+      }
+    },
+    "nativeContract": {
+      "type": "object",
+      "required": ["contract", "label"],
+      "properties": {
+        "contract": {"type": "string"},
+        "method": {"type": ["string", "null"]},
+        "label": {"type": "string"}
+      }
+    },
+    "manifestSummary": {
+      "type": "object",
+      "required": [
+        "name",
+        "supported_standards",
+        "features",
+        "groups",
+        "methods",
+        "events",
+        "permissions",
+        "abi"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "supported_standards": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "features": {"type": "object"},
+        "groups": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/groupSummary"}
+        },
+        "methods": {"type": "integer", "minimum": 0},
+        "events": {"type": "integer", "minimum": 0},
+        "permissions": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/permissionSummary"}
+        },
+        "trusts": {
+          "oneOf": [
+            {"$ref": "#/definitions/trustSummary"},
+            {"type": "null"}
+          ]
+        },
+        "abi": {"$ref": "#/definitions/abiSummary"}
+      }
+    },
+    "permissionSummary": {
+      "type": "object",
+      "required": ["contract", "methods"],
+      "properties": {
+        "contract": {"$ref": "#/definitions/permissionContract"},
+        "methods": {"$ref": "#/definitions/permissionMethods"}
+      }
+    },
+    "groupSummary": {
+      "type": "object",
+      "required": ["pubkey", "signature"],
+      "properties": {
+        "pubkey": {"type": "string"},
+        "signature": {"type": "string"}
+      }
+    },
+    "permissionContract": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["Wildcard", "Hash", "Group", "Other"]
+        },
+        "value": {
+          "type": ["string", "number", "boolean", "object", "array", "null"]
+        }
+      }
+    },
+    "permissionMethods": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"type": "string", "enum": ["Wildcard", "Methods"]},
+        "value": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          ]
+        }
+      }
+    },
+    "trustSummary": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["Wildcard", "Contracts", "Other"]
+        },
+        "value": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            {"type": "object"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "abiSummary": {
+      "type": "object",
+      "required": ["methods", "events"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiMethod"}
+        },
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiEvent"}
+        }
+      }
+    },
+    "abiMethod": {
+      "type": "object",
+      "required": ["name", "parameters", "return_type", "safe"],
+      "properties": {
+        "name": {"type": "string"},
+        "parameters": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiParameter"}
+        },
+        "return_type": {"type": "string"},
+        "safe": {"type": "boolean"},
+        "offset": {"type": ["integer", "null"]}
+      }
+    },
+    "abiEvent": {
+      "type": "object",
+      "required": ["name", "parameters"],
+      "properties": {
+        "name": {"type": "string"},
+        "parameters": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiParameter"}
+        }
+      }
+    },
+    "abiParameter": {
+      "type": "object",
+      "required": ["name", "ty"],
+      "properties": {
+        "name": {"type": "string"},
+        "ty": {"type": "string"}
+      }
+    }
+  }
+}

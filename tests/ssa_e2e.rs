@@ -1,0 +1,159 @@
+//! End-to-end coverage for real stack-effect SSA via `Decompilation::compute_ssa`.
+//!
+//! Phase 2 of the advanced-decompiler evolution: the SSA builder now produces
+//! genuine def/use chains and φ nodes (instead of the PUSH-only skeleton), driven
+//! by the comprehensive stack-effect model in `cfg::ssa::effects`.
+
+#![allow(clippy::unwrap_used)]
+
+use std::fs;
+
+use atipicial_decompiler::{Decompiler, OutputFormat, SsaStats};
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn decompile_loop_if() -> atipicial_decompiler::Decompilation {
+    let root = repo_root();
+    let aef = fs::read(root.join("TestingArtifacts/edgecases/LoopIf.aef")).unwrap();
+    let manifest = fs::read_to_string(root.join("TestingArtifacts/edgecases/LoopIf.manifest.json"))
+        .ok()
+        .and_then(|s| atipicial_decompiler::ContractManifest::from_json_str(&s).ok());
+    let mut dec = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef, manifest, OutputFormat::All)
+        .unwrap();
+    dec.compute_ssa();
+    dec
+}
+
+#[test]
+fn compute_ssa_produces_real_definitions_on_a_real_contract() {
+    let dec = decompile_loop_if();
+    let ssa = dec.ssa().expect("SSA should be computed");
+
+    // The skeleton produced zero definitions; the real stack-effect SSA must
+    // surface at least one definition (LoopIf has PUSH/STLOC/LDLOC/INC/...).
+    assert!(
+        !ssa.definitions.is_empty(),
+        "real SSA should record variable definitions; got stats: {}",
+        ssa.stats()
+    );
+}
+
+#[test]
+fn compute_ssa_stats_report_statements_and_blocks() {
+    let dec = decompile_loop_if();
+    let stats: SsaStats = dec.ssa().unwrap().stats();
+    assert!(stats.block_count > 0, "LoopIf CFG has basic blocks");
+    assert!(
+        stats.total_statements > 0,
+        "real SSA should produce assignment statements, not just comments"
+    );
+    assert!(
+        stats.total_variables > 0,
+        "real SSA should define variables"
+    );
+}
+
+#[test]
+fn compute_ssa_is_idempotent() {
+    // Calling compute_ssa twice must not panic or duplicate work.
+    let root = repo_root();
+    let aef = fs::read(root.join("TestingArtifacts/edgecases/LoopIf.aef")).unwrap();
+    let mut dec = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef, None, OutputFormat::All)
+        .unwrap();
+    dec.compute_ssa();
+    let first = dec.ssa().unwrap().stats();
+    dec.compute_ssa();
+    let second = dec.ssa().unwrap().stats();
+    assert_eq!(first, second, "compute_ssa must be idempotent");
+}
+
+#[test]
+fn optimize_ssa_runs_without_panicking_and_keeps_form_consistent() {
+    // optimize_ssa must run the optimization passes to a fixed point on a real
+    // contract, leave the SSA indexes consistent, and be safe to call twice.
+    let root = repo_root();
+    let aef = fs::read(root.join("TestingArtifacts/edgecases/LoopIf.aef")).unwrap();
+    let manifest = fs::read_to_string(root.join("TestingArtifacts/edgecases/LoopIf.manifest.json"))
+        .ok()
+        .and_then(|s| atipicial_decompiler::ContractManifest::from_json_str(&s).ok());
+
+    let mut dec = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef, manifest, OutputFormat::All)
+        .unwrap();
+    let rounds = dec.optimize_ssa();
+    // LoopIf has at least one foldable arithmetic (i++-style ADD); the optimizer
+    // may or may not simplify depending on stack layout, but it must not corrupt
+    // the form. Verify the indexes are still self-consistent.
+    let ssa = dec.ssa().expect("optimize_ssa computes SSA");
+    let stats = ssa.stats();
+    let _ = rounds;
+    assert!(
+        stats.total_variables == ssa.definitions.len(),
+        "definition count ({}) must match variable count ({}) after optimization",
+        ssa.definitions.len(),
+        stats.total_variables
+    );
+
+    // Calling optimize again is a no-op (already at fixed point) and must not panic.
+    let second = dec.optimize_ssa();
+    let _ = second;
+}
+
+#[test]
+fn render_optimized_ssa_produces_readable_block_text() {
+    // The optimized-SSA view should render block headers and at least one
+    // assignment, demonstrating that Phases 2+3 (SSA + optimizations) are
+    // surfaced as analysis-facing text via the IR lowering.
+    let root = repo_root();
+    let aef = fs::read(root.join("TestingArtifacts/edgecases/LoopIf.aef")).unwrap();
+    let manifest = fs::read_to_string(root.join("TestingArtifacts/edgecases/LoopIf.manifest.json"))
+        .ok()
+        .and_then(|s| atipicial_decompiler::ContractManifest::from_json_str(&s).ok());
+
+    let mut dec = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef, manifest, OutputFormat::All)
+        .unwrap();
+    let text = dec.render_optimized_ssa();
+    assert!(
+        !text.trim().is_empty(),
+        "optimized SSA view must be non-empty"
+    );
+    assert!(
+        text.contains("// block"),
+        "should contain a block header: {text}"
+    );
+    assert!(
+        text.contains("Optimized SSA"),
+        "should contain the form header: {text}"
+    );
+}
+
+#[test]
+fn render_structured_ir_emits_well_formed_output() {
+    // The structured-IR path recovers control flow from the CFG (Phase 4 spine)
+    // and must always produce well-formed, non-empty output on a real contract.
+    let root = repo_root();
+    let aef = fs::read(root.join("TestingArtifacts/edgecases/LoopIf.aef")).unwrap();
+    let manifest = fs::read_to_string(root.join("TestingArtifacts/edgecases/LoopIf.manifest.json"))
+        .ok()
+        .and_then(|s| atipicial_decompiler::ContractManifest::from_json_str(&s).ok());
+
+    let mut dec = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef, manifest, OutputFormat::All)
+        .unwrap();
+    let text = dec.render_structured_ir();
+    assert!(
+        !text.trim().is_empty(),
+        "structured IR view must be non-empty"
+    );
+    let open = text.chars().filter(|&c| c == '{').count();
+    let close = text.chars().filter(|&c| c == '}').count();
+    assert_eq!(
+        open, close,
+        "structured IR must have balanced braces:\n{text}"
+    );
+}

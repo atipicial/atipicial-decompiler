@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/atipicial/atipicial-decompiler/docs/schema/tokens.schema.json",
+  "title": "atipicial-decompiler tokens report",
+  "type": "object",
+  "required": ["file", "script_hash_le", "script_hash_be", "method_tokens", "warnings"],
+  "properties": {
+    "file": {"type": "string"},
+    "script_hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "script_hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "method_tokens": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/methodToken"}
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "definitions": {
+    "methodToken": {
+      "type": "object",
+      "required": [
+        "method",
+        "hash_le",
+        "hash_be",
+        "parameters",
+        "returns",
+        "call_flags",
+        "call_flag_labels",
+        "returns_value"
+      ],
+      "properties": {
+        "method": {"type": "string"},
+        "hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "parameters": {"type": "integer", "minimum": 0},
+        "returns": {"type": "boolean"},
+        "call_flags": {"type": "integer", "minimum": 0, "maximum": 255},
+        "call_flag_labels": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "returns_value": {"type": "boolean"},
+        "native_contract": {
+          "oneOf": [
+            {"$ref": "#/definitions/nativeContract"},
+            {"type": "null"}
+          ]
+        },
+        "warning": {"type": ["string", "null"]}
+      }
+    },
+    "nativeContract": {
+      "type": "object",
+      "required": ["contract", "label"],
+      "properties": {
+        "contract": {"type": "string"},
+        "method": {"type": ["string", "null"]},
+        "label": {"type": "string"}
+      }
+    }
+  }
+}

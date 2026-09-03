@@ -1,0 +1,86 @@
+use serde::Serialize;
+use serde_json::Value;
+
+#[derive(Serialize)]
+pub(in crate::cli) struct ManifestSummary {
+    pub(super) name: String,
+    pub(super) supported_standards: Vec<String>,
+    /// Raw `features` object from the manifest. Empty for every valid Atipicial
+    /// manifest; surfaced verbatim so malformed manifests stay inspectable.
+    pub(super) features: serde_json::Map<String, Value>,
+    pub(super) groups: Vec<GroupSummary>,
+    pub(super) methods: usize,
+    pub(super) events: usize,
+    pub(super) permissions: Vec<PermissionSummary>,
+    pub(super) trusts: Option<TrustSummary>,
+    pub(super) abi: AbiSummary,
+    /// Free-form metadata declared in the manifest's `extra` field. Most
+    /// contracts use this for a flat object of strings (`Author`,
+    /// `Email`, `Description`, etc.) but the spec allows any JSON value,
+    /// so we surface it verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) extra: Option<Value>,
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct GroupSummary {
+    pub(super) pubkey: String,
+    pub(super) signature: String,
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct PermissionSummary {
+    pub(super) contract: PermissionContractSummary,
+    pub(super) methods: PermissionMethodsSummary,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "value")]
+pub(in crate::cli) enum PermissionContractSummary {
+    Wildcard(String),
+    Hash(String),
+    Group(String),
+    Other(Value),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "value")]
+pub(in crate::cli) enum PermissionMethodsSummary {
+    Wildcard(String),
+    Methods(Vec<String>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "value")]
+pub(in crate::cli) enum TrustSummary {
+    Wildcard(String),
+    Contracts(Vec<String>),
+    Other(Value),
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct AbiSummary {
+    pub(super) methods: Vec<MethodSummary>,
+    pub(super) events: Vec<EventSummary>,
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct MethodSummary {
+    pub(super) name: String,
+    pub(super) parameters: Vec<ParameterSummary>,
+    pub(super) return_type: String,
+    pub(super) safe: bool,
+    pub(super) offset: Option<i32>,
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct EventSummary {
+    pub(super) name: String,
+    pub(super) parameters: Vec<ParameterSummary>,
+}
+
+#[derive(Serialize)]
+pub(in crate::cli) struct ParameterSummary {
+    pub(super) name: String,
+    pub(super) ty: String,
+}

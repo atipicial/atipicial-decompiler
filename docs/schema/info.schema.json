@@ -1,0 +1,226 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/atipicial/atipicial-decompiler/docs/schema/info.schema.json",
+  "title": "atipicial-decompiler info report",
+  "type": "object",
+  "required": [
+    "file",
+    "compiler",
+    "script_length",
+    "script_hash_le",
+    "script_hash_be",
+    "checksum",
+    "method_tokens",
+    "warnings"
+  ],
+  "properties": {
+    "file": {"type": "string"},
+    "manifest_path": {"type": ["string", "null"]},
+    "compiler": {"type": "string"},
+    "source": {"type": ["string", "null"]},
+    "script_length": {"type": "integer", "minimum": 0},
+    "script_hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "script_hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "checksum": {"type": "string", "pattern": "^0x[0-9A-F]{8}$"},
+    "method_tokens": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/methodToken"}
+    },
+    "manifest": {
+      "oneOf": [
+        {"$ref": "#/definitions/manifestSummary"},
+        {"type": "null"}
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "definitions": {
+    "methodToken": {
+      "type": "object",
+      "required": ["method", "hash_le", "hash_be", "parameters", "returns", "call_flags", "call_flag_labels", "returns_value"],
+      "properties": {
+        "method": {"type": "string"},
+        "hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+        "parameters": {"type": "integer", "minimum": 0},
+        "returns": {"type": "boolean"},
+        "call_flags": {"type": "integer", "minimum": 0, "maximum": 255},
+        "call_flag_labels": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "returns_value": {"type": "boolean"},
+        "native_contract": {
+          "oneOf": [
+            {"$ref": "#/definitions/nativeContract"},
+            {"type": "null"}
+          ]
+        },
+        "warning": {"type": ["string", "null"]}
+      }
+    },
+    "nativeContract": {
+      "type": "object",
+      "required": ["contract", "label"],
+      "properties": {
+        "contract": {"type": "string"},
+        "method": {"type": ["string", "null"]},
+        "label": {"type": "string"}
+      }
+    },
+    "manifestSummary": {
+      "type": "object",
+      "required": [
+        "name",
+        "supported_standards",
+        "features",
+        "groups",
+        "methods",
+        "events",
+        "permissions",
+        "abi"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "supported_standards": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "features": {"type": "object"},
+        "groups": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/groupSummary"}
+        },
+        "methods": {"type": "integer", "minimum": 0},
+        "events": {"type": "integer", "minimum": 0},
+        "permissions": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/permissionSummary"}
+        },
+        "trusts": {
+          "oneOf": [
+            {"$ref": "#/definitions/trustSummary"},
+            {"type": "null"}
+          ]
+        },
+        "abi": {"$ref": "#/definitions/abiSummary"}
+      }
+    },
+    "permissionSummary": {
+      "type": "object",
+      "required": ["contract", "methods"],
+      "properties": {
+        "contract": {"$ref": "#/definitions/permissionContract"},
+        "methods": {"$ref": "#/definitions/permissionMethods"}
+      }
+    },
+    "groupSummary": {
+      "type": "object",
+      "required": ["pubkey", "signature"],
+      "properties": {
+        "pubkey": {"type": "string"},
+        "signature": {"type": "string"}
+      }
+    },
+    "permissionContract": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["Wildcard", "Hash", "Group", "Other"]
+        },
+        "value": {
+          "type": ["string", "number", "boolean", "object", "array", "null"]
+        }
+      }
+    },
+    "permissionMethods": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"type": "string", "enum": ["Wildcard", "Methods"]},
+        "value": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          ]
+        }
+      }
+    },
+    "trustSummary": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["Wildcard", "Contracts", "Other"]
+        },
+        "value": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            {"type": "object"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "abiSummary": {
+      "type": "object",
+      "required": ["methods", "events"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiMethod"}
+        },
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiEvent"}
+        }
+      }
+    },
+    "abiMethod": {
+      "type": "object",
+      "required": ["name", "parameters", "return_type", "safe"],
+      "properties": {
+        "name": {"type": "string"},
+        "parameters": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiParameter"}
+        },
+        "return_type": {"type": "string"},
+        "safe": {"type": "boolean"},
+        "offset": {"type": ["integer", "null"]}
+      }
+    },
+    "abiEvent": {
+      "type": "object",
+      "required": ["name", "parameters"],
+      "properties": {
+        "name": {"type": "string"},
+        "parameters": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/abiParameter"}
+        }
+      }
+    },
+    "abiParameter": {
+      "type": "object",
+      "required": ["name", "ty"],
+      "properties": {
+        "name": {"type": "string"},
+        "ty": {"type": "string"}
+      }
+    }
+  }
+}

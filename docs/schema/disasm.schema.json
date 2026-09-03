@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/atipicial/atipicial-decompiler/docs/schema/disasm.schema.json",
+  "title": "atipicial-decompiler disassembly report",
+  "type": "object",
+  "required": ["file", "script_hash_le", "script_hash_be", "instructions", "warnings"],
+  "properties": {
+    "file": {"type": "string"},
+    "script_hash_le": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "script_hash_be": {"type": "string", "pattern": "^[0-9A-F]{40}$"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "instructions": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/instruction"}
+    }
+  },
+  "definitions": {
+    "instruction": {
+      "type": "object",
+      "required": ["offset", "opcode"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "opcode": {"type": "string"},
+        "operand": {"type": ["string", "null"]},
+        "operand_kind": {"type": ["string", "null"]},
+        "operand_value": {
+          "oneOf": [
+            {"$ref": "#/definitions/operandValue"},
+            {"type": "null"}
+          ]
+        },
+        "returns_value": {"type": ["boolean", "null"]}
+      }
+    },
+    "operandValue": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "I8",
+            "I16",
+            "I32",
+            "I64",
+            "U8",
+            "U16",
+            "U32",
+            "Bool",
+            "Bytes",
+            "Jump",
+            "Jump32",
+            "Syscall",
+            "Null"
+          ]
+        },
+        "value": {
+          "type": ["integer", "string", "boolean"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

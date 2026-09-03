@@ -1,0 +1,136 @@
+use crate::error::{AefError, Result};
+
+use super::types::MethodToken;
+
+fn read_u16_le(bytes: &[u8]) -> u16 {
+    let mut array = [0u8; 2];
+    array.copy_from_slice(bytes);
+    u16::from_le_bytes(array)
+}
+
+fn read_u32_le(bytes: &[u8]) -> u32 {
+    let mut array = [0u8; 4];
+    array.copy_from_slice(bytes);
+    u32::from_le_bytes(array)
+}
+
+fn read_u64_le(bytes: &[u8]) -> u64 {
+    let mut array = [0u8; 8];
+    array.copy_from_slice(bytes);
+    u64::from_le_bytes(array)
+}
+
+pub(super) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u32, usize)> {
+    let first = *bytes
+        .get(offset)
+        .ok_or(AefError::UnexpectedEof { offset })?;
+    // Matches the reference `MemoryReader.ReadVarInt`: the prefix selects the
+    // width and only the maximum value is validated. Non-canonical encodings
+    // (e.g. `FD 05 00` for 5) are accepted, because AEF checksums cover the
+    // raw bytes and such files are valid on-chain.
+    let (value, consumed) = match first {
+        0x00..=0xFC => (first as u32, 1),
+        0xFD => {
+            let slice = bytes
+                .get(offset + 1..offset + 3)
+                .ok_or(AefError::UnexpectedEof { offset })?;
+            let value = read_u16_le(slice);
+            (value as u32, 3)
+        }
+        0xFE => {
+            let slice = bytes
+                .get(offset + 1..offset + 5)
+                .ok_or(AefError::UnexpectedEof { offset })?;
+            let value = read_u32_le(slice);
+            (value, 5)
+        }
+        0xFF => {
+            let slice = bytes
+                .get(offset + 1..offset + 9)
+                .ok_or(AefError::UnexpectedEof { offset })?;
+            let value = read_u64_le(slice);
+            if value > u32::MAX as u64 {
+                return Err(AefError::IntegerOverflow { offset }.into());
+            }
+            (value as u32, 9)
+        }
+    };
+
+    Ok((value, consumed))
+}
+
+pub(super) fn encoded_method_tokens_size(tokens: &[MethodToken]) -> usize {
+    let mut size = varint_encoded_len(tokens.len() as u32);
+    for token in tokens {
+        size += 20; // hash
+        size += varint_encoded_len(token.method.len() as u32);
+        size += token.method.len();
+        size += 2; // parameters count
+        size += 1; // return value flag
+        size += 1; // call flags
+    }
+    size
+}
+
+pub(super) fn varint_encoded_len(value: u32) -> usize {
+    match value {
+        0x00..=0xFC => 1,
+        0xFD..=0xFFFF => 3,
+        _ => 5,
+    }
+}
+
+pub(super) fn read_varstring(
+    bytes: &[u8],
+    offset: usize,
+    max_len: usize,
+) -> Result<(String, usize)> {
+    let (len, consumed) = read_varint(bytes, offset)?;
+    let len = len as usize;
+    if len > max_len {
+        return Err(AefError::SourceTooLong {
+            length: len,
+            max: max_len,
+        }
+        .into());
+    }
+    let start = offset
+        .checked_add(consumed)
+        .ok_or(AefError::UnexpectedEof { offset })?;
+    let end = start
+        .checked_add(len)
+        .ok_or(AefError::UnexpectedEof { offset: start })?;
+    let slice = bytes
+        .get(start..end)
+        .ok_or(AefError::UnexpectedEof { offset: start })?;
+    let value = std::str::from_utf8(slice)
+        .map_err(|_| AefError::InvalidUtf8String { offset: start })?
+        .to_string();
+    Ok((value, consumed + slice.len()))
+}
+
+pub(super) fn read_varbytes(
+    bytes: &[u8],
+    offset: usize,
+    max_len: usize,
+) -> Result<(Vec<u8>, usize)> {
+    let (len, consumed) = read_varint(bytes, offset)?;
+    let len = len as usize;
+    if len > max_len {
+        return Err(AefError::ScriptTooLarge {
+            length: len,
+            max: max_len,
+        }
+        .into());
+    }
+    let start = offset
+        .checked_add(consumed)
+        .ok_or(AefError::UnexpectedEof { offset })?;
+    let end = start
+        .checked_add(len)
+        .ok_or(AefError::UnexpectedEof { offset: start })?;
+    let slice = bytes
+        .get(start..end)
+        .ok_or(AefError::UnexpectedEof { offset: start })?;
+    Ok((slice.to_vec(), consumed + slice.len()))
+}

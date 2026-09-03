@@ -1,0 +1,297 @@
+//! Browser-friendly reports and optional WebAssembly bindings.
+
+use crate::disassembler::UnknownHandling;
+use crate::error::Result;
+use crate::manifest::ContractManifest;
+use crate::aef::AefParser;
+use crate::{Decompiler, OutputFormat};
+
+mod report;
+
+pub use report::{WebDecompileReport, WebDisasmReport, WebInfoReport};
+
+/// Options for browser-oriented disassembly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebDisasmOptions {
+    /// Fail fast instead of emitting `UNKNOWN_0x..` instructions and warnings.
+    pub fail_on_unknown_opcodes: bool,
+}
+
+/// Options for browser-oriented decompilation.
+#[derive(Debug, Clone)]
+pub struct WebDecompileOptions {
+    /// Optional manifest JSON string to load alongside the AEF bytes.
+    pub manifest_json: Option<String>,
+    /// Enforce strict manifest validation when `manifest_json` is provided.
+    pub strict_manifest: bool,
+    /// Fail fast instead of emitting `UNKNOWN_0x..` instructions and warnings.
+    pub fail_on_unknown_opcodes: bool,
+    /// Inline single-use temporaries into their consumers in the
+    /// rendered high-level / C# output. Defaults to `true` so the
+    /// browser surface mirrors the CLI's clean output by default;
+    /// callers wanting the un-inlined form (e.g. for cross-
+    /// referencing temps against trace comments) can flip this off.
+    pub inline_single_use_temps: bool,
+    /// Emit per-instruction `// XXXX: OPCODE` trace comments above
+    /// each lifted statement. Defaults to `false` — the rendered
+    /// output is human-readable by default; callers debugging a
+    /// specific contract can opt back into trace comments.
+    pub emit_trace_comments: bool,
+    /// Use conservative inferred C# declaration types. Defaults to `true`
+    /// for readable contract output; set to `false` for compatibility with
+    /// the legacy dynamic/var rendering.
+    pub typed_declarations: bool,
+    /// Select which rendered outputs should be generated.
+    pub output_format: OutputFormat,
+}
+
+impl Default for WebDecompileOptions {
+    fn default() -> Self {
+        Self {
+            manifest_json: None,
+            strict_manifest: false,
+            fail_on_unknown_opcodes: false,
+            inline_single_use_temps: true,
+            emit_trace_comments: false,
+            typed_declarations: true,
+            // The browser-facing decompile API produces the generated C#
+            // contract by default. Analysis views remain available through
+            // an explicit `output_format` selection.
+            output_format: OutputFormat::CSharp,
+        }
+    }
+}
+
+/// Build a browser-friendly AEF info report from in-memory bytes.
+///
+/// The optional manifest input should be a UTF-8 JSON string.
+///
+/// # Errors
+///
+/// Returns an error if the AEF container or manifest is invalid.
+pub fn info_report(aef_bytes: &[u8], manifest_json: Option<&str>) -> Result<WebInfoReport> {
+    let aef = AefParser::new().parse(aef_bytes)?;
+    let manifest = parse_manifest(manifest_json, false)?;
+    Ok(report::build_info_report(&aef, manifest.as_ref()))
+}
+
+/// Build a browser-friendly disassembly report from in-memory bytes.
+///
+/// # Errors
+///
+/// Returns an error if the AEF container is invalid or disassembly fails.
+pub fn disasm_report(aef_bytes: &[u8], options: WebDisasmOptions) -> Result<WebDisasmReport> {
+    let handling = unknown_handling(options.fail_on_unknown_opcodes);
+    // Parse the AEF directly so the report can surface script_hash
+    // alongside the instruction stream — parity with WebInfoReport
+    // and WebDecompileReport. The internal `disassemble_bytes` call
+    // also parses, but discards the AefFile after extracting the
+    // script.
+    let aef = AefParser::new().parse(aef_bytes)?;
+    let output = Decompiler::with_unknown_handling(handling).disassemble_bytes(aef_bytes)?;
+    Ok(report::build_disasm_report(&aef, output))
+}
+
+/// Build a browser-friendly decompilation report from in-memory bytes.
+///
+/// # Errors
+///
+/// Returns an error if the AEF container or optional manifest is invalid, or
+/// if disassembly/decompilation fails.
+pub fn decompile_report(
+    aef_bytes: &[u8],
+    options: WebDecompileOptions,
+) -> Result<WebDecompileReport> {
+    let manifest = parse_manifest(options.manifest_json.as_deref(), options.strict_manifest)?;
+    let handling = unknown_handling(options.fail_on_unknown_opcodes);
+    let decompiler = Decompiler::with_unknown_handling(handling)
+        .with_inline_single_use_temps(options.inline_single_use_temps)
+        .with_trace_comments(options.emit_trace_comments)
+        .with_typed_declarations(options.typed_declarations);
+    let result =
+        decompiler.decompile_bytes_with_manifest(aef_bytes, manifest, options.output_format)?;
+    Ok(report::build_decompile_report(result))
+}
+
+fn parse_manifest(manifest_json: Option<&str>, strict: bool) -> Result<Option<ContractManifest>> {
+    manifest_json
+        .map(|json| {
+            if strict {
+                ContractManifest::from_json_str_strict(json)
+            } else {
+                ContractManifest::from_json_str(json)
+            }
+        })
+        .transpose()
+}
+
+fn unknown_handling(fail_on_unknown_opcodes: bool) -> UnknownHandling {
+    if fail_on_unknown_opcodes {
+        UnknownHandling::Error
+    } else {
+        UnknownHandling::Permit
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+use crate::Error;
+#[cfg(target_arch = "wasm32")]
+use serde::de::DeserializeOwned;
+#[cfg(target_arch = "wasm32")]
+use serde::Deserialize;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct JsInfoOptions {
+    manifest_json: Option<String>,
+    strict_manifest: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct JsDisasmOptions {
+    fail_on_unknown_opcodes: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct JsDecompileOptions {
+    manifest_json: Option<String>,
+    strict_manifest: bool,
+    fail_on_unknown_opcodes: bool,
+    inline_single_use_temps: bool,
+    emit_trace_comments: bool,
+    typed_declarations: bool,
+    output_format: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for JsDecompileOptions {
+    fn default() -> Self {
+        let defaults = WebDecompileOptions::default();
+        Self {
+            manifest_json: None,
+            strict_manifest: false,
+            fail_on_unknown_opcodes: false,
+            inline_single_use_temps: defaults.inline_single_use_temps,
+            emit_trace_comments: defaults.emit_trace_comments,
+            typed_declarations: defaults.typed_declarations,
+            output_format: None,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = initPanicHook)]
+/// Install a panic hook that forwards Rust panics to the browser console.
+pub fn init_panic_hook() {
+    console_error_panic_hook::set_once();
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Serialize a report to a `JsValue` with BigInt enabled for 64/128-bit
+/// integers. The default serde-wasm-bindgen serializer throws on any i64/u64
+/// outside the JS safe-integer range — e.g. a `PUSHINT64` operand near
+/// `i64::MAX` (routine bytecode) or a large integer in a manifest
+/// `extra`/`features` passthrough — which aborts the whole report for
+/// otherwise-valid input. The CLI serializes via serde_json and already handles
+/// the full range; this keeps the web boundary at parity. (`usize`/`i32`
+/// offsets are u32/i32 on wasm32 and continue to serialize as plain numbers.)
+fn report_to_js<T: serde::Serialize>(value: &T) -> std::result::Result<JsValue, JsValue> {
+    let serializer =
+        serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true);
+    serde::Serialize::serialize(value, &serializer)
+        .map_err(|err| JsValue::from_str(&err.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = infoReport)]
+/// Build an info report from AEF bytes and a JS options object.
+pub fn info_report_wasm(
+    aef_bytes: &[u8],
+    options: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let options: JsInfoOptions = parse_js_options(options)?;
+    let manifest = parse_manifest(options.manifest_json.as_deref(), options.strict_manifest)
+        .map_err(to_js_error)?;
+    let aef = AefParser::new().parse(aef_bytes).map_err(to_js_error)?;
+    report_to_js(&report::build_info_report(&aef, manifest.as_ref()))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = disasmReport)]
+/// Build a disassembly report from AEF bytes and a JS options object.
+pub fn disasm_report_wasm(
+    aef_bytes: &[u8],
+    options: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let options: JsDisasmOptions = parse_js_options(options)?;
+    let report = disasm_report(
+        aef_bytes,
+        WebDisasmOptions {
+            fail_on_unknown_opcodes: options.fail_on_unknown_opcodes,
+        },
+    )
+    .map_err(to_js_error)?;
+    report_to_js(&report)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = decompileReport)]
+/// Build a decompilation report from AEF bytes and a JS options object.
+pub fn decompile_report_wasm(
+    aef_bytes: &[u8],
+    options: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let options: JsDecompileOptions = parse_js_options(options)?;
+    let output_format = parse_output_format(options.output_format.as_deref())
+        .map_err(|err| JsValue::from_str(&err))?;
+    let report = decompile_report(
+        aef_bytes,
+        WebDecompileOptions {
+            manifest_json: options.manifest_json,
+            strict_manifest: options.strict_manifest,
+            fail_on_unknown_opcodes: options.fail_on_unknown_opcodes,
+            inline_single_use_temps: options.inline_single_use_temps,
+            emit_trace_comments: options.emit_trace_comments,
+            typed_declarations: options.typed_declarations,
+            output_format,
+        },
+    )
+    .map_err(to_js_error)?;
+    report_to_js(&report)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_js_options<T>(value: JsValue) -> std::result::Result<T, JsValue>
+where
+    T: Default + DeserializeOwned,
+{
+    if value.is_null() || value.is_undefined() {
+        Ok(T::default())
+    } else {
+        serde_wasm_bindgen::from_value(value)
+            .map_err(|err| JsValue::from_str(&format!("invalid options: {err}")))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_output_format(value: Option<&str>) -> std::result::Result<OutputFormat, String> {
+    match value.unwrap_or("csharp") {
+        "all" => Ok(OutputFormat::All),
+        "pseudocode" => Ok(OutputFormat::Pseudocode),
+        "high_level" | "highLevel" => Ok(OutputFormat::HighLevel),
+        "csharp" | "c_sharp" => Ok(OutputFormat::CSharp),
+        other => Err(format!("invalid output_format: {other}")),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn to_js_error(err: Error) -> JsValue {
+    JsValue::from_str(&err.to_string())
+}

@@ -1,0 +1,234 @@
+[
+  {
+    "class_name": "CryptoLib",
+    "name": "CryptoLib",
+    "script_hash": "1bf575ab1189688413610a35a12886cde0b66c72",
+    "methods": [
+      "Bls12381Add",
+      "Bls12381Deserialize",
+      "Bls12381Equal",
+      "Bls12381Mul",
+      "Bls12381Pairing",
+      "Bls12381Serialize",
+      "Keccak256",
+      "Murmur32",
+      "Sha256",
+      "VerifyWithECDsa",
+      "VerifyWithEd25519",
+      "recoverSecp256K1",
+      "ripemd160",
+      "verifyWithECDsa"
+    ]
+  },
+  {
+    "class_name": "Notary",
+    "name": "Notary",
+    "script_hash": "3bec3531119bbad76dd044920b0de6c3194fe1c1",
+    "methods": [
+      "BalanceOf",
+      "ExpirationOf",
+      "GetMaxNotValidBeforeDelta",
+      "LockDepositUntil",
+      "OnAEP17Payment",
+      "SetMaxNotValidBeforeDelta",
+      "Verify",
+      "Withdraw",
+      "_OnPayment"
+    ]
+  },
+  {
+    "class_name": "OracleContract",
+    "name": "OracleContract",
+    "script_hash": "588717117e0aa81072afab71d2dd89fe7c4b92fe",
+    "methods": [
+      "Finish",
+      "GetPrice",
+      "Request",
+      "SetPrice",
+      "Verify"
+    ]
+  },
+  {
+    "class_name": "Governance",
+    "name": "Governance",
+    "script_hash": "67ca70350663bf258ca513049467c6059d15e74c",
+    "methods": [
+      "GetAllCandidates",
+      "GetCandidateVote",
+      "GetCandidates",
+      "GetCommittee",
+      "GetCommitteeAddress",
+      "GetGasPerBlock",
+      "GetNextBlockValidators",
+      "GetRegisterPrice",
+      "GetVoteTarget",
+      "RegisterCandidate",
+      "SetGasPerBlock",
+      "SetRegisterPrice",
+      "UnclaimedGas",
+      "UnregisterCandidate",
+      "Vote"
+    ]
+  },
+  {
+    "class_name": "PolicyContract",
+    "name": "PolicyContract",
+    "script_hash": "7bc681c0a1f71d543457b68bba8d5f9fdd4e5ecc",
+    "methods": [
+      "BlockAccount",
+      "GetAttributeFee",
+      "GetBlockedAccounts",
+      "GetExecFeeFactor",
+      "GetExecPicoFeeFactor",
+      "GetFeePerByte",
+      "GetMaxTraceableBlocks",
+      "GetMaxValidUntilBlockIncrement",
+      "GetMillisecondsPerBlock",
+      "GetStoragePrice",
+      "GetWhitelistFeeContracts",
+      "IsBlocked",
+      "RecoverFund",
+      "RemoveWhitelistFeeContract",
+      "SetAttributeFee",
+      "SetExecFeeFactor",
+      "SetFeePerByte",
+      "SetMaxTraceableBlocks",
+      "SetMaxValidUntilBlockIncrement",
+      "SetMillisecondsPerBlock",
+      "SetStoragePrice",
+      "SetWhitelistFeeContract",
+      "UnblockAccount",
+      "blockAccount",
+      "getAttributeFee",
+      "setAttributeFee"
+    ]
+  },
+  {
+    "class_name": "TokenManagement",
+    "name": "TokenManagement",
+    "script_hash": "9f040ea4a8448f015af645659b0fb2ae7dc500ae",
+    "methods": [
+      "BalanceOf",
+      "GetAssetsOfOwner",
+      "GetTokenInfo"
+    ]
+  },
+  {
+    "class_name": "LedgerContract",
+    "name": "LedgerContract",
+    "script_hash": "bef2043140362a77c15099c7e64c12f700b665da",
+    "methods": [
+      "CurrentHash",
+      "CurrentIndex",
+      "GetBlock",
+      "GetTransactionFromBlock",
+      "GetTransactionHeight",
+      "GetTransactionSigners",
+      "GetTransactionVMState",
+      "getTransaction"
+    ]
+  },
+  {
+    "class_name": "StdLib",
+    "name": "StdLib",
+    "script_hash": "c0ef39cee0e4e925c6c2a06a79e1440dd86fceac",
+    "methods": [
+      "Atoi",
+      "Base58CheckDecode",
+      "Base58CheckEncode",
+      "Base58Decode",
+      "Base58Encode",
+      "Base64Decode",
+      "Base64Encode",
+      "Base64UrlDecode",
+      "Base64UrlEncode",
+      "Deserialize",
+      "HexDecode",
+      "HexEncode",
+      "Itoa",
+      "JsonDeserialize",
+      "JsonSerialize",
+      "MemoryCompare",
+      "MemorySearch",
+      "Serialize",
+      "StrLen",
+      "StringSplit"
+    ]
+  },
+  {
+    "class_name": "Treasury",
+    "name": "Treasury",
+    "script_hash": "c13a56c98353a7ea6a324d9a835d1b5bf2266315",
+    "methods": [
+      "OnAEP11Payment",
+      "OnAEP17Payment",
+      "Verify"
+    ]
+  },
+  {
+    "class_name": "AtipicialDollar",
+    "name": "AtipicialDollar",
+    "script_hash": "cf76e28bd0062c4a478ee35561011319f3cfa4d2",
+    "methods": [
+      "BalanceOf",
+      "Decimals",
+      "Symbol",
+      "TotalSupply",
+      "Transfer"
+    ]
+  },
+  {
+    "class_name": "RoleManagement",
+    "name": "RoleManagement",
+    "script_hash": "e295e391544c178ad94f03ec4dcdff78534ecf49",
+    "methods": [
+      "DesignateAsRole",
+      "GetDesignatedByRole"
+    ]
+  },
+  {
+    "class_name": "AtipicialCoin",
+    "name": "AtipicialCoin",
+    "script_hash": "f563ea40bc283d4d0e05c48ea305b3f2a07340ef",
+    "methods": [
+      "BalanceOf",
+      "Decimals",
+      "GetAccountState",
+      "GetAllCandidates",
+      "GetCandidateVote",
+      "GetCandidates",
+      "GetCommittee",
+      "GetCommitteeAddress",
+      "GetGasPerBlock",
+      "GetNextBlockValidators",
+      "GetRegisterPrice",
+      "OnAEP17Payment",
+      "RegisterCandidate",
+      "SetGasPerBlock",
+      "SetRegisterPrice",
+      "Symbol",
+      "TotalSupply",
+      "Transfer",
+      "UnclaimedGas",
+      "UnregisterCandidate",
+      "Vote"
+    ]
+  },
+  {
+    "class_name": "ContractManagement",
+    "name": "ContractManagement",
+    "script_hash": "fda3fa4346ea532a258fc497ddaddb6437c9fdff",
+    "methods": [
+      "Deploy",
+      "Destroy",
+      "GetContract",
+      "GetContractById",
+      "GetContractHashes",
+      "GetMinimumDeploymentFee",
+      "HasMethod",
+      "IsContract",
+      "SetMinimumDeploymentFee",
+      "Update"
+    ]
+  }
+]

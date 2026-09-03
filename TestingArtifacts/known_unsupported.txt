@@ -1,0 +1,2 @@
+# Valid contracts that exercise a known decompiler limitation.
+# Format: path/or/name[:expected error substring]

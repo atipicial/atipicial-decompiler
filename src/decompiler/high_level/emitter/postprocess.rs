@@ -1,0 +1,17 @@
+//! Post-processing passes applied to lifted high-level statements.
+//!
+//! These passes are intentionally lightweight: they rewrite some common
+//! Atipicial-compiler patterns (notably loops) into more idiomatic pseudo-code.
+
+mod compound_assign;
+mod else_if;
+mod for_loops;
+mod indexing;
+mod inline;
+mod join_close_chain;
+mod labels;
+mod overflow_collapse;
+mod simplify;
+mod switches;
+mod util;
+mod while_loops;

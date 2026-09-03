@@ -1,0 +1,48 @@
+{
+  "name": "atipicial-decompiler-js",
+  "version": "2.0.0",
+  "description": "Pure JavaScript Atipicial AEF decompiler — parse, disassemble, and decompile smart contracts to human-readable pseudocode. Zero dependencies.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "atipicial",
+    "atipicial",
+    "aef",
+    "decompiler",
+    "disassembler",
+    "smart-contract",
+    "bytecode",
+    "blockchain",
+    "vm",
+    "pseudocode"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atipicial/atipicial-decompiler.git",
+    "directory": "js"
+  },
+  "bugs": {
+    "url": "https://github.com/atipicial/atipicial-decompiler/issues"
+  },
+  "homepage": "https://github.com/atipicial/atipicial-decompiler#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "generate:opcodes": "node scripts/generate-opcodes.mjs",
+    "generate:syscalls": "node scripts/generate-syscalls.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

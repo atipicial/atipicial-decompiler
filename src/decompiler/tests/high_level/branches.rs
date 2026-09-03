@@ -1,0 +1,229 @@
+use super::*;
+
+#[test]
+fn high_level_lifts_simple_if_block() {
+    // Script: PUSH1, JMPIFNOT +5, PUSH2, RET, PUSH3, RET
+    let script = [0x11, 0x26, 0x05, 0x12, 0x40, 0x13, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(high_level.contains("if t0 {"));
+    assert!(high_level.contains("// 0003: PUSH2"));
+    assert!(high_level.contains("}\n        // 0006: RET"));
+}
+
+#[test]
+fn high_level_closes_if_at_end() {
+    // Script: PUSH1, JMPIFNOT +4, PUSH2, RET
+    let script = [0x11, 0x26, 0x04, 0x12, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(high_level.contains("if t0 {"));
+    assert!(high_level.contains("        }\n    }\n}"));
+}
+
+#[test]
+fn high_level_lifts_if_else_block() {
+    // Script: PUSH1, JMPIFNOT +5, PUSH2, JMP +4, PUSH3, RET, RET
+    let script = [0x11, 0x26, 0x05, 0x12, 0x22, 0x04, 0x13, 0x40, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(high_level.contains("if t0 {"));
+    assert!(high_level.contains("else {"));
+    assert!(
+        high_level.contains("let t1 = 2;") || high_level.contains("return 2;"),
+        "if-branch value: {high_level}"
+    );
+    assert!(
+        high_level.contains("let t2 = 3;") || high_level.contains("return 3;"),
+        "else-branch value: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_lifts_jmpeq_forward_branch() {
+    // Script: PUSH1, PUSH1, JMPEQ +4 (to RET), PUSH2, RET
+    let script = [0x11, 0x11, 0x28, 0x04, 0x12, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("if t0 != t1 {"),
+        "JMPEQ fall-through body should use negated condition: {high_level}"
+    );
+    assert!(
+        !high_level.contains("jump-if-eq ->"),
+        "JMPEQ should no longer emit a raw jump warning: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_lifts_jmpif_forward_branch() {
+    // Script: PUSH1, JMPIF +4 (to RET), PUSH2, RET
+    let script = [0x11, 0x24, 0x04, 0x12, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("if !t0 {"),
+        "JMPIF forward branch should be lifted as negated if-condition: {high_level}"
+    );
+    assert!(
+        !high_level.contains("jump-if ->"),
+        "JMPIF should no longer emit raw jump-if warnings: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_lifts_jmpif_l_forward_branch() {
+    // Script: PUSH1, JMPIF_L +6 (to RET), PUSH2, RET
+    let script = [0x11, 0x25, 0x06, 0x00, 0x00, 0x00, 0x12, 0x40];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("if !t0 {"),
+        "JMPIF_L forward branch should be lifted as negated if-condition: {high_level}"
+    );
+    assert!(
+        !high_level.contains("jump-if ->"),
+        "JMPIF_L should no longer emit raw jump-if warnings: {high_level}"
+    );
+}
+
+#[test]
+fn high_level_else_branch_restores_pre_branch_stack_snapshot() {
+    // Script:
+    // PUSH1, PUSH2, PUSH3, PUSH1(cond), JMPIFNOT +6, DROP, DROP, JMP +3, REVERSE3, RET
+    // Without else-entry stack restoration, REVERSE3 underflows because the then-branch
+    // drops values before the emitter reaches the else block.
+    let script = [
+        0x11, 0x12, 0x13, 0x11, 0x26, 0x06, 0x45, 0x45, 0x22, 0x03, 0x53, 0x40,
+    ];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    // The previous "reverse top 3 stack values" check was VM
+    // narration — stripped from clean output now. The substantive
+    // check below ensures REVERSE3 in the else branch saw a
+    // restored stack (no underflow).
+    assert!(
+        !high_level.contains("insufficient values on stack for REVERSE3"),
+        "else entry should restore the pre-branch stack snapshot before REVERSE3: {high_level}"
+    );
+}
+
+#[test]
+fn crossing_comparison_branch_does_not_emit_malformed_double_else() {
+    // Regression (adversarial): a comparison branch (JMPLT etc.) whose if-body
+    // contains an inner comparison branch that crosses the outer block's closer
+    // previously produced a structurally invalid double `else`. The crossing
+    // guard now emits a guarded goto, keeping the output well-formed.
+    let script = [
+        0x11, 0x12, 0x30, 0x08, 0x13, 0x14, 0x30, 0x06, 0x15, 0x40, 0x16, 0x40, 0x17, 0x40,
+    ];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    // Output must be brace-balanced (well-formed)...
+    let balance: i32 = high_level
+        .chars()
+        .map(|c| match c {
+            '{' => 1,
+            '}' => -1,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(balance, 0, "output must be brace-balanced: {high_level}");
+    // ...and must not contain a second `else` for a single `if` (the malformed
+    // double-else shape). With three returns and one structured if, at most one
+    // `else {` may appear.
+    assert!(
+        high_level.matches("else {").count() <= 1,
+        "crossing comparison branch must not produce a second else: {high_level}"
+    );
+}
+
+#[test]
+fn crossing_unary_branch_does_not_emit_malformed_double_else() {
+    // Regression (adversarial): a unary JMPIF branch (not a comparison) whose
+    // if-body holds an inner JMPIF that crosses the outer block's closer
+    // previously produced a structurally invalid double `else` — the inner
+    // implicit-else span [false_offset, else_end) swallowed the outer if's
+    // continuation (the always-taken `return 9` here). The crossing-closer
+    // guard in detect_implicit_else now suppresses that implicit else.
+    // PUSH1; JMPIF +9; PUSH2; JMPIF +4; PUSH7; RET; PUSH8; RET; PUSH9; RET.
+    let script = [
+        0x11, 0x24, 0x09, 0x12, 0x24, 0x04, 0x17, 0x40, 0x18, 0x40, 0x19, 0x40,
+    ];
+    let aef_bytes = build_aef(&script);
+    let decompilation = Decompiler::new()
+        .decompile_bytes(&aef_bytes)
+        .expect("decompile succeeds");
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    let balance: i32 = high_level
+        .chars()
+        .map(|c| match c {
+            '{' => 1,
+            '}' => -1,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(balance, 0, "output must be brace-balanced: {high_level}");
+    assert!(
+        high_level.matches("else {").count() <= 1,
+        "crossing unary branch must not produce a second else: {high_level}"
+    );
+}

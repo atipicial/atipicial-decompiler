@@ -1,0 +1,131 @@
+use super::*;
+
+#[test]
+fn high_level_limits_instructions_to_entry_range() {
+    // Script: PUSH1; RET; PUSH2; RET
+    let script = [0x11, 0x40, 0x12, 0x40];
+    let aef_bytes = build_aef(&script);
+    let manifest = ContractManifest::from_json_str(
+        r#"
+            {
+                "name": "Multi",
+                "abi": {
+                    "methods": [
+                        { "name": "entry", "parameters": [], "returntype": "Integer", "offset": 0 },
+                        { "name": "other", "parameters": [], "returntype": "Integer", "offset": 2 }
+                    ],
+                    "events": []
+                },
+                "permissions": [],
+                "trusts": "*"
+            }
+            "#,
+    )
+    .expect("manifest parsed");
+
+    let decompilation = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef_bytes, Some(manifest), OutputFormat::All)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("return 1;"),
+        "entry body should return 1: {high_level}"
+    );
+    assert!(
+        high_level.contains("fn other() -> int {"),
+        "additional manifest methods should be emitted in high-level view"
+    );
+    assert!(
+        high_level.contains("return 2;"),
+        "additional method body should be decompiled: {high_level}"
+    );
+    let before_other = high_level
+        .split("fn other")
+        .next()
+        .expect("entry section present");
+    assert!(
+        !before_other.contains("0002"),
+        "entry section should not contain helper instructions"
+    );
+}
+
+#[test]
+fn high_level_trims_initslot_boundaries() {
+    let Some(aef_bytes) = try_load_testing_aef("Contract_Delegate.aef") else {
+        eprintln!("Skipping: Contract_Delegate.aef not found in devpack artifacts");
+        return;
+    };
+    let Some(manifest) = try_load_testing_manifest("Contract_Delegate.manifest.json") else {
+        eprintln!("Skipping: Contract_Delegate.manifest.json not found");
+        return;
+    };
+
+    let decompilation = Decompiler::new()
+        .decompile_bytes_with_manifest(&aef_bytes, Some(manifest), OutputFormat::All)
+        .expect("decompile succeeds");
+
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+    assert!(
+        high_level.contains("// 0000: INITSLOT"),
+        "entry block should still be rendered"
+    );
+    let sum_block = high_level
+        .split("\n    fn testDelegate(")
+        .next()
+        .expect("sumFunc section");
+    assert!(
+        !sum_block.contains("// 000C: INITSLOT"),
+        "should stop at the first INITSLOT boundary for sumFunc"
+    );
+    assert!(
+        !sum_block.contains("return t23;"),
+        "duplicate return from appended block should not appear"
+    );
+    assert!(
+        high_level.contains("fn sub_0x000C(arg0, arg1)"),
+        "inferred private helper should be rendered as a separate method"
+    );
+}
+
+#[test]
+fn high_level_private_void_call_preserves_ambient_return_value() {
+    let aef_bytes = build_aef(&[
+        0x19, 0x11, 0x34, 0x05, 0x40, 0x21, 0x21, 0x57, 0x00, 0x01, 0x78, 0x45, 0x40,
+    ]);
+    let manifest = ContractManifest::from_json_str(
+        r#"{
+            "name": "InferredVoidHelper",
+            "abi": { "methods": [{
+                "name": "main", "parameters": [], "returntype": "Integer", "offset": 0
+            }] }
+        }"#,
+    )
+    .expect("manifest parsed");
+
+    let decompilation = Decompiler::new()
+        .with_inline_single_use_temps(true)
+        .with_trace_comments(false)
+        .decompile_bytes_with_manifest(&aef_bytes, Some(manifest), OutputFormat::All)
+        .expect("decompile succeeds");
+    let high_level = decompilation
+        .high_level
+        .as_deref()
+        .expect("high-level output");
+
+    assert!(
+        high_level.contains("sub_0x0007(1);") && high_level.contains("return 9;"),
+        "private void call must preserve the caller's ambient value: {high_level}"
+    );
+    assert!(
+        high_level.contains("fn sub_0x0007(arg0) {")
+            && !high_level.contains("return sub_0x0007(1)"),
+        "private helper must render as void rather than manufacture a result: {high_level}"
+    );
+}

@@ -1,0 +1,240 @@
+import { DisassemblyError } from "./errors.js";
+import { OPCODES } from "./generated/opcodes.js";
+import { SYSCALLS } from "./generated/syscalls.js";
+import {
+  asUint8Array,
+  hex32,
+  readI16LE,
+  readI32LE,
+  readI64LE,
+  readU16LE,
+  readU32LE,
+  upperHex,
+} from "./util.js";
+
+const MAX_OPERAND_LEN = 1_048_576;
+
+export function disassembleScript(input, options = {}) {
+  const bytecode = asUint8Array(input);
+  const failOnUnknownOpcodes = options.failOnUnknownOpcodes ?? false;
+  const instructions = [];
+  const warnings = [];
+  let offset = 0;
+
+  while (offset < bytecode.byteLength) {
+    const opcodeByte = bytecode[offset];
+    const opcode = OPCODES.get(opcodeByte);
+    if (!opcode) {
+      if (failOnUnknownOpcodes) {
+        throw new DisassemblyError(
+          `unknown opcode 0x${opcodeByte.toString(16).padStart(2, "0").toUpperCase()} at offset ${offset}`,
+          { code: "UnknownOpcode", opcode: opcodeByte, offset },
+        );
+      }
+      warnings.push(
+        `disassembly: unknown opcode 0x${opcodeByte.toString(16).padStart(2, "0").toUpperCase()} at 0x${offset.toString(16).padStart(4, "0").toUpperCase()}; continuing may desynchronize output`,
+      );
+      instructions.push({
+        offset,
+        opcode: {
+          name: "Unknown",
+          mnemonic: "UNKNOWN",
+          byte: opcodeByte,
+        },
+        operand: null,
+      });
+      offset += 1;
+      continue;
+    }
+
+    const operandResult = readOperand(opcode, bytecode, offset);
+    instructions.push({
+      offset,
+      opcode,
+      operand: operandResult.operand,
+    });
+    offset += 1 + operandResult.consumed;
+  }
+
+  return { instructions, warnings };
+}
+
+export function formatOperand(operand) {
+  if (operand === null) {
+    return "";
+  }
+  switch (operand.kind) {
+    case "I8":
+    case "I16":
+    case "I32":
+    case "I64":
+    case "U8":
+    case "U16":
+    case "U32":
+      return `${operand.value}`;
+    case "Bool":
+      return operand.value ? "true" : "false";
+    case "Null":
+      return "null";
+    case "Bytes":
+      return `0x${upperHex(operand.value)}`;
+    case "Jump":
+    case "Jump32":
+      return `${operand.value}`;
+    case "Syscall": {
+      // Mirror Rust's `Display for Operand::Syscall`: prefix the
+      // resolved syscall name when known, falling back to bare hex
+      // for unknown/reserved hashes. Earlier the JS port always
+      // emitted `0xHASH` even for known syscalls, leaving the
+      // pseudocode less readable than Rust's
+      // `System.Storage.Get (0x12345678)` form.
+      const info = SYSCALLS.get(operand.value);
+      const hex = `0x${hex32(operand.value)}`;
+      return info ? `${info.name} (${hex})` : hex;
+    }
+    default:
+      return String(operand.value);
+  }
+}
+
+function readOperand(opcode, bytecode, offset) {
+  const immediate = immediateConstant(opcode.mnemonic);
+  if (immediate) {
+    return { operand: immediate, consumed: 0 };
+  }
+
+  const encoding = opcode.operandEncoding;
+  switch (encoding.kind) {
+    case "None":
+      return { operand: null, consumed: 0 };
+    case "I8": {
+      checkBounds(bytecode, offset + 1, 1, offset);
+      const byte = bytecode[offset + 1];
+      return {
+        operand: { kind: "I8", value: byte > 127 ? byte - 256 : byte },
+        consumed: 1,
+      };
+    }
+    case "I16": {
+      checkBounds(bytecode, offset + 1, 2, offset);
+      return { operand: { kind: "I16", value: readI16LE(bytecode, offset + 1) }, consumed: 2 };
+    }
+    case "I32": {
+      checkBounds(bytecode, offset + 1, 4, offset);
+      return { operand: { kind: "I32", value: readI32LE(bytecode, offset + 1) }, consumed: 4 };
+    }
+    case "I64": {
+      checkBounds(bytecode, offset + 1, 8, offset);
+      return { operand: { kind: "I64", value: readI64LE(bytecode, offset + 1).toString() }, consumed: 8 };
+    }
+    case "Bytes":
+      return {
+        operand: { kind: "Bytes", value: readSlice(bytecode, offset + 1, encoding.length, offset) },
+        consumed: encoding.length,
+      };
+    case "Data1":
+      return readPrefixedBytes(bytecode, offset, 1);
+    case "Data2":
+      return readPrefixedBytes(bytecode, offset, 2);
+    case "Data4":
+      return readPrefixedBytes(bytecode, offset, 4);
+    case "Jump8": {
+      checkBounds(bytecode, offset + 1, 1, offset);
+      const byte = bytecode[offset + 1];
+      return {
+        operand: { kind: "Jump", value: byte > 127 ? byte - 256 : byte },
+        consumed: 1,
+      };
+    }
+    case "Jump32": {
+      checkBounds(bytecode, offset + 1, 4, offset);
+      return { operand: { kind: "Jump32", value: readI32LE(bytecode, offset + 1) }, consumed: 4 };
+    }
+    case "U8": {
+      checkBounds(bytecode, offset + 1, 1, offset);
+      return { operand: { kind: "U8", value: bytecode[offset + 1] }, consumed: 1 };
+    }
+    case "U16": {
+      checkBounds(bytecode, offset + 1, 2, offset);
+      return { operand: { kind: "U16", value: readU16LE(bytecode, offset + 1) }, consumed: 2 };
+    }
+    case "U32": {
+      checkBounds(bytecode, offset + 1, 4, offset);
+      return { operand: { kind: "U32", value: readU32LE(bytecode, offset + 1) }, consumed: 4 };
+    }
+    case "Syscall": {
+      checkBounds(bytecode, offset + 1, 4, offset);
+      return { operand: { kind: "Syscall", value: readU32LE(bytecode, offset + 1) }, consumed: 4 };
+    }
+    default:
+      return { operand: null, consumed: 0 };
+  }
+}
+
+function readPrefixedBytes(bytecode, offset, prefixLength) {
+  const length = readLength(bytecode, offset + 1, prefixLength, offset);
+  if (length > MAX_OPERAND_LEN) {
+    throw new DisassemblyError(
+      `operand length ${length} exceeds maximum at offset ${offset}`,
+      { code: "OperandTooLarge", offset, len: length },
+    );
+  }
+  return {
+    operand: {
+      kind: "Bytes",
+      value: readSlice(bytecode, offset + 1 + prefixLength, length, offset),
+    },
+    consumed: prefixLength + length,
+  };
+}
+
+function readLength(bytecode, start, prefixLength, offset) {
+  // Bounds-check the FULL length prefix before decoding it, mirroring
+  // Rust's `read_bytes_prefixed` (operand.rs), which calls `read_slice`
+  // for the whole prefix first. Reading via readU16LE/readU32LE directly
+  // coerced out-of-bounds bytes (undefined) to 0, fabricating a partial
+  // length from a truncated prefix and then surfacing the wrong error
+  // (OperandTooLarge) instead of UnexpectedEof.
+  switch (prefixLength) {
+    case 1:
+      return readSlice(bytecode, start, 1, offset)[0];
+    case 2:
+      return readU16LE(readSlice(bytecode, start, 2, offset), 0);
+    case 4:
+      return readU32LE(readSlice(bytecode, start, 4, offset), 0);
+    default:
+      return 0;
+  }
+}
+
+function checkBounds(bytecode, start, length, offset) {
+  if (start + length > bytecode.byteLength) {
+    throw new DisassemblyError(`unexpected end of bytecode at offset ${offset}`, {
+      code: "UnexpectedEof",
+      offset,
+    });
+  }
+}
+
+function readSlice(bytecode, start, length, offset) {
+  checkBounds(bytecode, start, length, offset);
+  return bytecode.subarray(start, start + length);
+}
+
+const PUSHNULL_OP = { kind: "Null", value: null };
+const PUSHT_OP = { kind: "Bool", value: true };
+const PUSHF_OP = { kind: "Bool", value: false };
+const PUSHM1_OP = { kind: "I32", value: -1 };
+const PUSH_LIT_RE = /^PUSH(\d+|M1)$/u;
+
+function immediateConstant(mnemonic) {
+  // Short-circuit majority of opcodes that don't start with PUSH.
+  if (!mnemonic.startsWith("PUSH")) return null;
+  if (mnemonic === "PUSHNULL") return PUSHNULL_OP;
+  if (mnemonic === "PUSHT") return PUSHT_OP;
+  if (mnemonic === "PUSHF") return PUSHF_OP;
+  const match = PUSH_LIT_RE.exec(mnemonic);
+  if (!match) return null;
+  if (match[1] === "M1") return PUSHM1_OP;
+  return { kind: "I32", value: Number(match[1]) };
+}

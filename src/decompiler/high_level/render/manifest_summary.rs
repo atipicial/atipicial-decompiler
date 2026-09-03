@@ -1,0 +1,139 @@
+use std::fmt::Write;
+
+use crate::manifest::ContractManifest;
+
+use crate::decompiler::helpers::{
+    format_manifest_type, format_permission_entry, render_extra_scalar, sanitize_identifier,
+};
+
+pub(super) fn write_manifest_summary(output: &mut String, manifest: &ContractManifest) {
+    if !manifest.supported_standards.is_empty() {
+        let standards = manifest
+            .supported_standards
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(output, "    supported_standards = [{standards}];").unwrap();
+    }
+
+    // Valid Atipicial manifests carry an empty `features` object; only a
+    // malformed manifest has content here, surfaced verbatim.
+    if !manifest.features.is_empty() {
+        writeln!(output, "    features {{").unwrap();
+        for (key, value) in &manifest.features {
+            writeln!(output, "        {key} = {value};").unwrap();
+        }
+        writeln!(output, "    }}").unwrap();
+    }
+
+    if !manifest.groups.is_empty() {
+        // `groups` is the list of pubkey/signature pairs that authorise
+        // signed updates of the contract. The signature is opaque
+        // base64; show only the pubkey (canonical short form) so the
+        // summary stays scannable. Sample shape:
+        //
+        //   groups {
+        //       pubkey=02f49ce0c33a...
+        //   }
+        writeln!(output, "    groups {{").unwrap();
+        for group in &manifest.groups {
+            writeln!(output, "        pubkey={}", group.pubkey).unwrap();
+        }
+        writeln!(output, "    }}").unwrap();
+    }
+
+    if !manifest.permissions.is_empty() {
+        writeln!(output, "    permissions {{").unwrap();
+        for permission in &manifest.permissions {
+            writeln!(output, "        {}", format_permission_entry(permission)).unwrap();
+        }
+        writeln!(output, "    }}").unwrap();
+    }
+
+    if let Some(trusts) = manifest.trusts.as_ref() {
+        writeln!(output, "    trusts = {};", trusts.describe()).unwrap();
+    }
+    if let Some(serde_json::Value::Object(map)) = manifest.extra.as_ref() {
+        for (key, value) in map {
+            if let Some(rendered) = render_extra_scalar(value) {
+                writeln!(output, "    // {key}: {rendered}").unwrap();
+            }
+        }
+    }
+
+    if !manifest.abi.methods.is_empty() {
+        writeln!(output, "    // ABI methods").unwrap();
+        for method in &manifest.abi.methods {
+            let method_name = sanitize_identifier(&method.name);
+            let params = method
+                .parameters
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{}: {}",
+                        sanitize_identifier(&param.name),
+                        format_manifest_type(&param.kind)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let return_type = format_manifest_type(&method.return_type);
+            let mut meta = Vec::new();
+            if method_name != method.name {
+                meta.push(format!("manifest {:?}", method.name));
+            }
+            if method.safe {
+                meta.push("safe".to_string());
+            }
+            if let Some(offset) = method.offset {
+                meta.push(format!("offset {}", offset));
+            }
+            let meta_comment = if meta.is_empty() {
+                String::new()
+            } else {
+                format!(" // {}", meta.join(", "))
+            };
+            writeln!(
+                output,
+                "    fn {}({}) -> {};{}",
+                method_name, params, return_type, meta_comment
+            )
+            .unwrap();
+        }
+    }
+
+    if !manifest.abi.events.is_empty() {
+        writeln!(output, "    // ABI events").unwrap();
+        for event in &manifest.abi.events {
+            let params = event
+                .parameters
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{}: {}",
+                        sanitize_identifier(&param.name),
+                        format_manifest_type(&param.kind)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let event_name = sanitize_identifier(&event.name);
+            let mut meta = Vec::new();
+            if event_name != event.name {
+                meta.push(format!("manifest {:?}", event.name));
+            }
+            let meta_comment = if meta.is_empty() {
+                String::new()
+            } else {
+                format!(" // {}", meta.join(", "))
+            };
+            writeln!(
+                output,
+                "    event {}({});{}",
+                event_name, params, meta_comment
+            )
+            .unwrap();
+        }
+    }
+}

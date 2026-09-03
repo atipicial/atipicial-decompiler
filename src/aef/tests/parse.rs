@@ -1,0 +1,160 @@
+use super::*;
+
+#[test]
+fn parses_valid_aef() {
+    let script = vec![0x10, 0x11, 0x40];
+    let bytes = build_sample(&script);
+    let aef = AefParser::new().parse(&bytes).expect("parse succeeds");
+
+    assert_eq!(aef.header.magic, MAGIC);
+    assert_eq!(aef.header.compiler, "atipicial-sample");
+    assert!(aef.header.source.is_empty());
+    assert_eq!(aef.script, script);
+    assert!(aef.method_tokens.is_empty());
+    assert_eq!(
+        util::format_hash(&aef.script_hash()),
+        util::format_hash(&util::hash160(&[0x10, 0x11, 0x40]))
+    );
+}
+
+#[test]
+fn rejects_bad_magic() {
+    let mut bytes = build_sample(&[0x40]);
+    bytes[0] = b'X';
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::InvalidMagic { .. })
+    ));
+}
+
+#[test]
+fn rejects_bad_checksum() {
+    let mut bytes = build_sample(&[0x40]);
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::ChecksumMismatch { .. })
+    ));
+}
+
+#[test]
+fn rejects_truncated_checksum_instead_of_panicking() {
+    let mut bytes = build_sample(&[0x40]);
+    bytes.pop(); // drop part of the checksum trailer
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::UnexpectedEof { .. })
+    ));
+}
+
+#[test]
+fn rejects_trailing_bytes() {
+    let script = vec![0x40];
+    let bytes = build_sample(&script);
+    let mut with_extra = bytes;
+    with_extra.push(0x99);
+
+    let err = AefParser::new().parse(&with_extra).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::TrailingData { extra: 1 })
+    ));
+}
+
+#[test]
+fn rejects_nonzero_reserved_byte() {
+    let mut bytes = build_sample(&[0x40]);
+    bytes[69] = 0x01;
+
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::ReservedByteNonZero {
+            offset: 69,
+            value: 0x01
+        })
+    ));
+}
+
+#[test]
+fn rejects_nonzero_reserved_word() {
+    let mut bytes = build_sample(&[0x40]);
+    let reserved_word_offset = 4 + 64 + 1 + 1 + 1;
+    bytes[reserved_word_offset] = 0x34;
+    bytes[reserved_word_offset + 1] = 0x12;
+    let checksum = AefParser::calculate_checksum(&bytes[..bytes.len() - 4]);
+    let checksum_offset = bytes.len() - 4;
+    bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::ReservedWordNonZero { offset, value: 0x1234 })
+            if offset == reserved_word_offset
+    ));
+}
+
+#[test]
+fn rejects_oversized_u64_varint_for_source_length() {
+    let script = vec![0x40];
+    let mut data = Vec::new();
+    data.extend_from_slice(&MAGIC);
+    data.extend_from_slice(&[0u8; 64]);
+    data.push(0xFF);
+    data.extend_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
+    data.push(0);
+    data.push(0);
+    data.extend_from_slice(&0u16.to_le_bytes());
+    write_varint(&mut data, script.len() as u32);
+    data.extend_from_slice(&script);
+    let checksum = AefParser::calculate_checksum(&data);
+    data.extend_from_slice(&checksum.to_le_bytes());
+
+    let err = AefParser::new().parse(&data).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::IntegerOverflow { offset: 68 })
+    ));
+}
+
+#[test]
+fn accepts_non_canonical_varint_for_source_length() {
+    // The reference MemoryReader.ReadVarInt has no canonicality check: the
+    // prefix selects the width and only the value range is validated, so a
+    // source length of 5 encoded as `FD 05 00` must parse as 5.
+    let script = vec![0x40];
+    let mut data = Vec::new();
+    data.extend_from_slice(&MAGIC);
+    data.extend_from_slice(&[0u8; 64]);
+    data.push(0xFD);
+    data.extend_from_slice(&5u16.to_le_bytes());
+    data.extend_from_slice(b"src:5");
+    data.push(0); // reserved byte
+    data.push(0); // zero tokens
+    data.extend_from_slice(&0u16.to_le_bytes());
+    write_varint(&mut data, script.len() as u32);
+    data.extend_from_slice(&script);
+    let checksum = AefParser::calculate_checksum(&data);
+    data.extend_from_slice(&checksum.to_le_bytes());
+
+    let aef = AefParser::new().parse(&data).expect("parse succeeds");
+    assert_eq!(aef.header.source, "src:5");
+    assert_eq!(aef.script, script);
+}
+
+#[test]
+fn rejects_leading_0xff_magic() {
+    // Cross-port vector: a 0xFF-leading file must fail magic validation
+    // (and not crash on text decoding, as the JS port once did).
+    let mut bytes = build_sample(&[0x40]);
+    bytes[0] = 0xFF;
+    let err = AefParser::new().parse(&bytes).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::Aef(AefError::InvalidMagic { .. })
+    ));
+}

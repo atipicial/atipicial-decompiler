@@ -1,0 +1,16 @@
+//! Atipicial contract manifest parsing and helpers.
+
+/// Atipicial specifies `MaxManifestSize = 0xFFFF` (65535 bytes).
+const MAX_MANIFEST_SIZE: u64 = 0xFFFF;
+
+mod describe;
+mod model;
+mod parse;
+
+pub use model::{
+    ContractManifest, ManifestAbi, ManifestEvent, ManifestGroup, ManifestMethod, ManifestParameter,
+    ManifestPermission, ManifestPermissionContract, ManifestPermissionMethods, ManifestTrusts,
+};
+
+#[cfg(test)]
+mod tests;

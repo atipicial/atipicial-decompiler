@@ -1,0 +1,222 @@
+use crate::instruction::Instruction;
+use crate::manifest::ContractManifest;
+use crate::aef::AefFile;
+
+use super::analysis::call_graph::CallGraph;
+use super::analysis::method_contracts::MethodContracts;
+use super::analysis::patterns::PatternInfo;
+use super::analysis::types::TypeInfo;
+use super::analysis::xrefs::Xrefs;
+use super::cfg::ssa::{SsaBuilder, SsaForm};
+use super::cfg::Cfg;
+
+/// Result of a successful decompilation run.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Decompilation {
+    /// Parsed AEF container.
+    pub aef: AefFile,
+    /// Optional parsed contract manifest.
+    pub manifest: Option<ContractManifest>,
+    /// Non-fatal warnings emitted during disassembly or rendering.
+    pub warnings: Vec<String>,
+    /// Disassembled instruction stream from the AEF script.
+    pub instructions: Vec<Instruction>,
+    /// Control flow graph built from the instruction stream.
+    pub cfg: Cfg,
+    /// Best-effort call graph extracted from the instruction stream.
+    pub call_graph: CallGraph,
+    /// Declared and conservatively inferred stack-call contracts by method.
+    pub method_contracts: MethodContracts,
+    /// Conservative contract-standard and C# target pattern summary.
+    pub patterns: PatternInfo,
+    /// Best-effort cross-reference information for locals/args/statics.
+    pub xrefs: Xrefs,
+    /// Best-effort primitive/collection type inference.
+    pub types: TypeInfo,
+    /// Optional rendered pseudocode output.
+    pub pseudocode: Option<String>,
+    /// Optional rendered high-level output.
+    pub high_level: Option<String>,
+    /// Optional rendered C# output.
+    pub csharp: Option<String>,
+    /// SSA form of the control flow graph (computed lazily).
+    pub(crate) ssa: Option<SsaForm>,
+}
+
+impl Decompilation {
+    /// Get the control flow graph as DOT format for visualization.
+    ///
+    /// The DOT output can be rendered using Graphviz or similar tools.
+    /// The graph carries a `label` attribute combining the contract
+    /// name (when a manifest is provided), the script hash, and the
+    /// instruction count, so a multi-CFG dump stays self-identifying.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let decompilation = decompiler.decompile_bytes(&aef_bytes)?;
+    /// let dot = decompilation.cfg_to_dot();
+    /// std::fs::write("cfg.dot", dot)?;
+    /// // Then run: dot -Tpng cfg.dot -o cfg.png
+    /// ```
+    #[must_use]
+    pub fn cfg_to_dot(&self) -> String {
+        let title = self.cfg_dot_title();
+        let mut dot = self.cfg.to_dot();
+        // Splice the graph-level label between the `digraph CFG {`
+        // header and the existing `node [shape=box];` line. Keeping
+        // this layered above `cfg::to_dot` (rather than threading a
+        // title argument through) means the lower-level graph
+        // emitter remains agnostic of contract identity.
+        if let Some(rest) = dot.strip_prefix("digraph CFG {\n") {
+            let mut header = String::from("digraph CFG {\n");
+            header.push_str(&format!("  label=\"{title}\";\n"));
+            header.push_str("  labelloc=\"t\";\n");
+            header.push_str(rest);
+            dot = header;
+        }
+        dot
+    }
+
+    fn cfg_dot_title(&self) -> String {
+        let script_hash = crate::util::format_hash(&self.aef.script_hash());
+        let name = self
+            .manifest
+            .as_ref()
+            .map(|m| m.name.trim())
+            .filter(|n| !n.is_empty());
+        let count = self.instructions.len();
+        match name {
+            Some(name) => format!("{name} ({script_hash}, {count} instr)"),
+            None => format!("{script_hash} ({count} instr)"),
+        }
+    }
+
+    /// Get the cached SSA form for this decompilation, if available.
+    ///
+    /// Call [`Self::compute_ssa`] first to populate the cached SSA value.
+    ///
+    /// # Returns
+    ///
+    /// `Option<&SsaForm>` - The SSA form, or `None` if CFG has no blocks.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let mut decompilation = decompiler.decompile_bytes(&aef_bytes)?;
+    /// decompilation.compute_ssa();
+    /// if let Some(ssa) = decompilation.ssa() {
+    ///     println!("SSA Stats: {}", ssa.stats());
+    ///     println!("{}", ssa.render());
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ssa(&self) -> Option<&SsaForm> {
+        self.ssa.as_ref()
+    }
+
+    /// Compute SSA form if not already computed.
+    ///
+    /// Builds a real stack-effect SSA (def/use chains + φ nodes at control-flow
+    /// joins) from the instructions and CFG, with precomputed dominance
+    /// information. See [`SsaBuilder`](crate::decompiler::cfg::ssa::SsaBuilder).
+    pub fn compute_ssa(&mut self) {
+        if self.ssa.is_none() && self.cfg.block_count() > 0 {
+            let builder = SsaBuilder::new(&self.cfg, &self.instructions);
+            self.ssa = Some(builder.build());
+        }
+    }
+
+    /// Compute (if needed) and optimize the SSA form in place.
+    ///
+    /// Runs constant folding/propagation, copy propagation, trivial-φ
+    /// elimination, and dead-code elimination to a fixed point. Returns the
+    /// number of optimization rounds applied (`0` if the form was already
+    /// optimal). Computes the SSA first if it has not been built yet.
+    pub fn optimize_ssa(&mut self) -> usize {
+        self.compute_ssa();
+        match &mut self.ssa {
+            Some(ssa) => crate::decompiler::cfg::ssa::optimize_ssa(ssa),
+            None => 0,
+        }
+    }
+
+    /// Render the optimized SSA form as readable pseudo-code.
+    ///
+    /// Computes and optimizes the SSA (if not already done), then lowers it to
+    /// the typed IR and renders it. This surfaces the Phase 2/3 data-flow work
+    /// (φ resolution, constant folding, copy propagation, DCE) as analysis-facing
+    /// text — the scaffolding for the full IR-spine renderer.
+    #[must_use]
+    pub fn render_optimized_ssa(&mut self) -> String {
+        self.optimize_ssa();
+        match &self.ssa {
+            Some(ssa) => crate::decompiler::cfg::ssa::render_ssa_form(ssa),
+            None => String::new(),
+        }
+    }
+
+    /// Render a structured IR view by recovering control flow from the CFG.
+    ///
+    /// Computes + optimizes the SSA, then runs the CFG structurer
+    /// (`cfg::structure`) to recover `if` / `if-else` constructs as typed
+    /// `ir::ControlFlow` nodes — the structural alternative to the legacy
+    /// string-pattern postprocess. Straight-line bodies carry the optimized
+    /// SSA data-flow. This is an additive analysis view; the CLI's primary
+    /// decompile output is the manifest-aware C# contract.
+    #[must_use]
+    pub fn render_structured_ir(&mut self) -> String {
+        // Per-method + envelope render. Fall back to the single-CFG render if
+        // extraction fails or yields no methods, so the view never regresses.
+        let table = crate::decompiler::analysis::MethodTable::new(
+            &self.instructions,
+            self.manifest.as_ref(),
+        );
+        let views =
+            crate::decompiler::cfg::method_view::extract_method_cfgs(&table, &self.instructions);
+        if !views.is_empty() {
+            return crate::decompiler::cfg::method_view::render_envelope(
+                &self.aef,
+                self.manifest.as_ref(),
+                &views,
+                &self.call_graph,
+                &self.method_contracts,
+                &mut self.warnings,
+            );
+        }
+        self.render_structured_ir_single_cfg()
+    }
+
+    /// Fallback: render the whole-script CFG as a single structured block.
+    /// Used when per-method extraction yields no methods.
+    fn render_structured_ir_single_cfg(&mut self) -> String {
+        self.optimize_ssa();
+        match &self.ssa {
+            Some(ssa) => {
+                let block = crate::decompiler::cfg::structure_cfg(ssa);
+                crate::decompiler::ir::render_block(&block, 0)
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Get SSA statistics if SSA form is available.
+    ///
+    /// # Returns
+    ///
+    /// `Option<String>` - Formatted statistics string, or `None` if SSA not computed.
+    #[must_use]
+    pub fn ssa_stats(&self) -> Option<String> {
+        self.ssa.as_ref().map(|ssa| format!("{}", ssa.stats()))
+    }
+
+    /// Render SSA form if available.
+    ///
+    /// # Returns
+    ///
+    /// `Option<String>` - Rendered SSA code, or `None` if SSA not computed.
+    #[must_use]
+    pub fn render_ssa(&self) -> Option<String> {
+        self.ssa.as_ref().map(SsaForm::render)
+    }
+}

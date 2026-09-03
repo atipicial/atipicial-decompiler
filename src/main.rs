@@ -1,0 +1,12 @@
+#![forbid(unsafe_code)]
+
+use clap::Parser;
+
+use atipicial_decompiler::cli::Cli;
+
+fn main() {
+    if let Err(err) = Cli::parse().run() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}

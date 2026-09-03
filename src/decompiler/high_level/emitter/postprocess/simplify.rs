@@ -1,0 +1,506 @@
+use super::super::HighLevelEmitter;
+
+mod temps;
+
+impl HighLevelEmitter {
+    /// Collapses `if true { ... }` blocks into their body.
+    pub(crate) fn collapse_if_true(statements: &mut Vec<String>) {
+        let mut index = 0;
+        while index < statements.len() {
+            if statements[index].trim() != "if true {" {
+                index += 1;
+                continue;
+            }
+            let Some(end) = Self::find_block_end(statements, index) else {
+                index += 1;
+                continue;
+            };
+            if statements[end].trim() != "}" {
+                index += 1;
+                continue;
+            }
+            statements.remove(end);
+            statements.remove(index);
+        }
+    }
+
+    /// Inverts `if cond { } else { ... }` → `if !(cond) { ... }`.
+    /// The Atipicial compiler emits JMPNE/JMPEQ patterns that produce empty
+    /// if-bodies with all logic in the else branch.
+    pub(crate) fn invert_empty_if_else(statements: &mut Vec<String>) {
+        let mut index = 0;
+        while index < statements.len() {
+            let trimmed = statements[index].trim();
+            if !trimmed.starts_with("if ") || !trimmed.ends_with('{') {
+                index += 1;
+                continue;
+            }
+            // Check if body is empty (only comments between `if` and `}`)
+            let mut j = index + 1;
+            while j < statements.len() {
+                let t = statements[j].trim();
+                if !t.is_empty() && !t.starts_with("//") {
+                    break;
+                }
+                j += 1;
+            }
+            if j >= statements.len() || statements[j].trim() != "}" {
+                index += 1;
+                continue;
+            }
+            let close_if = j;
+            // Next line must be `else {`
+            if close_if + 1 >= statements.len() || statements[close_if + 1].trim() != "else {" {
+                index += 1;
+                continue;
+            }
+            let else_line = close_if + 1;
+            // Require a well-formed (terminated) else block; bail otherwise.
+            let Some(_else_end) = Self::find_block_end(statements, else_line) else {
+                index += 1;
+                continue;
+            };
+            // Extract and negate condition
+            let indent = &statements[index][..statements[index].len() - trimmed.len()];
+            let cond = &trimmed[3..trimmed.len() - 2]; // strip "if " and " {"
+            let negated = Self::negate_condition(cond);
+            // Rewrite the empty-if header to the negated condition, then drop the
+            // empty if-body `}` and the `else {` opener. The else block's own
+            // closing `}` is intentionally retained — it becomes the closer for
+            // the inverted `if`, keeping brace balance intact. Comments from the
+            // empty if-body are kept as bytecode annotations.
+            statements[index] = format!("{indent}if {negated} {{");
+            statements.drain(close_if..=else_line);
+            // Don't advance — re-check at same index
+        }
+    }
+
+    /// Removes `if cond { }` blocks with no else branch (dead no-op conditionals).
+    pub(crate) fn remove_empty_if(statements: &mut Vec<String>) {
+        let mut index = 0;
+        while index < statements.len() {
+            let trimmed = statements[index].trim();
+            if !trimmed.starts_with("if ") || !trimmed.ends_with('{') {
+                index += 1;
+                continue;
+            }
+            let mut j = index + 1;
+            while j < statements.len() {
+                let t = statements[j].trim();
+                if !t.is_empty() && !t.starts_with("//") {
+                    break;
+                }
+                j += 1;
+            }
+            if j >= statements.len() || statements[j].trim() != "}" {
+                index += 1;
+                continue;
+            }
+            // Must NOT be followed by else
+            if j + 1 < statements.len() && statements[j + 1].trim().starts_with("else") {
+                index += 1;
+                continue;
+            }
+            statements.drain(index..=j);
+        }
+    }
+
+    /// Returns true when `rhs` is safe to drop without altering side effects
+    /// or hiding a runtime exception the original bytecode would have raised.
+    ///
+    /// Accepts:
+    /// - literals (numbers, hex, strings, byte literals, true/false/null)
+    /// - bare identifiers (loc0, arg1, static0, tN, …)
+    /// - arithmetic over the above using the operators listed below — ATC
+    ///   `ADD`/`SUB`/`MUL`/`AND`/`OR`/`XOR`/`SHL`/`SHR` and the comparison
+    ///   ops are observably pure on the lifted view (read but never mutate)
+    ///   and do not throw on valid operand types.
+    ///
+    /// Rejects:
+    /// - expressions containing `/` or `%` — `DIV`/`MOD` throw on divide by
+    ///   zero, so eliminating an unused temp would hide a real exception.
+    /// - expressions containing `[` — `PICKITEM` throws on out-of-bounds
+    ///   indexing or missing map keys; same hazard as above.
+    /// - expressions containing `(` (calls), unless the call is a
+    ///   known-pure helper. Side-effecting ATC calls (syscalls,
+    ///   internal CALL, CALLA, CALLT, manifest method names) must
+    ///   stay non-inlinable; without inlining them, two consumers
+    ///   would each re-execute the side effect. The whitelist
+    ///   covers the pure ATC arithmetic / buffer / type-check
+    ///   helpers the lift emits — these can be inlined safely
+    ///   because re-evaluation has no observable effect.
+    fn is_pure_rhs(rhs: &str) -> bool {
+        let trimmed = rhs.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        // Reject divide-by-zero and indexing throws unconditionally.
+        if trimmed
+            .as_bytes()
+            .iter()
+            .any(|b| matches!(*b, b'/' | b'%' | b'['))
+        {
+            return false;
+        }
+        // No call → safe (literals, identifiers, arithmetic, etc.).
+        if !trimmed.contains('(') {
+            return true;
+        }
+        // Has a call — accept only when every call site in the
+        // expression starts with a known-pure helper identifier.
+        rhs_calls_only_pure_helpers(trimmed)
+    }
+
+    /// Collapse `((expr))` to `(expr)` whenever the inner parens form a
+    /// matched pair surrounding the entire content. The single-use-temp
+    /// inliner unconditionally wraps multi-token substitutions in parens
+    /// for precedence safety; when the substitution lands inside an
+    /// existing parenthesised context (e.g. a `assert((x > 0))` call
+    /// argument), the result is doubly-parenthesised. Stripping the
+    /// inner pair leaves the operator-precedence intact.
+    pub(crate) fn reduce_double_parens(statements: &mut [String]) {
+        for stmt in statements.iter_mut() {
+            // Loop until no change so chains like `(((x)))` collapse fully.
+            loop {
+                let mut next: Option<String> = None;
+                let bytes = stmt.as_bytes();
+                let mut i = 0;
+                while i + 1 < bytes.len() {
+                    if bytes[i] == b'(' && bytes[i + 1] == b'(' {
+                        // Walk the inner `(` to find its matching `)`.
+                        let inner_open = i + 1;
+                        let mut depth = 1usize;
+                        let mut j = inner_open + 1;
+                        while j < bytes.len() {
+                            match bytes[j] {
+                                b'(' => depth += 1,
+                                b')' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                        if depth != 0 {
+                            break;
+                        }
+                        // The character immediately after the inner `)`
+                        // must itself be `)` for the outer pair to be
+                        // redundant — i.e. the pattern is `((...))`
+                        // where both parens close back-to-back.
+                        if j + 1 < bytes.len() && bytes[j + 1] == b')' {
+                            let mut rebuilt = String::with_capacity(stmt.len() - 2);
+                            rebuilt.push_str(&stmt[..i]);
+                            rebuilt.push('(');
+                            rebuilt.push_str(&stmt[inner_open + 1..j]);
+                            rebuilt.push(')');
+                            rebuilt.push_str(&stmt[j + 2..]);
+                            next = Some(rebuilt);
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                match next {
+                    Some(rebuilt) => *stmt = rebuilt,
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// Strips VM-level stack operation comments that add noise to the output:
+    /// - Removes standalone `// drop ...`, `// remove second stack value`,
+    ///   `// swapped top two stack values`, `// xdrop stack[...]`,
+    ///   `// rotate top three stack values`, `// tuck top of stack`,
+    ///   `// reverse top N stack values`, and `// clear stack` lines.
+    ///   These describe the VM-level rearrangement; the actual data flow
+    ///   is already captured in subsequent variable references, so the
+    ///   comment is redundant once the lift completes.
+    /// - Strips trailing `// duplicate top of stack` and `// copy second stack value`.
+    pub(crate) fn strip_stack_comments(statements: &mut [String]) {
+        for stmt in statements.iter_mut() {
+            let trimmed = stmt.trim();
+            if trimmed.starts_with("// drop ")
+                || trimmed.starts_with("// remove second")
+                || trimmed.starts_with("// swapped top")
+                || trimmed.starts_with("// xdrop stack")
+                || trimmed.starts_with("// rotate top")
+                || trimmed.starts_with("// tuck top")
+                || trimmed.starts_with("// reverse top")
+                || trimmed == "// clear stack"
+            {
+                stmt.clear();
+                continue;
+            }
+            for suffix in [" // duplicate top of stack", " // copy second stack value"] {
+                if let Some(pos) = stmt.find(suffix) {
+                    stmt.truncate(pos);
+                }
+            }
+        }
+    }
+
+    fn is_temp_ident(s: &str) -> bool {
+        s.strip_prefix('t')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// Extract the distinct `tN` temp tokens (whole identifiers) appearing in a
+    /// line, matching the JS `\bt\d+\b` token regex with identifier-boundary
+    /// semantics. Used by `collapse_temp_into_store`'s line-count prepass.
+    fn temp_tokens(line: &str) -> std::collections::HashSet<String> {
+        let bytes = line.as_bytes();
+        let mut out = std::collections::HashSet::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Token must start at an identifier boundary with `t` followed by
+            // at least one digit.
+            let boundary_ok =
+                i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if boundary_ok && bytes[i] == b't' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                // Need at least one digit, and the char after must not extend
+                // the identifier (no trailing letter/digit/underscore).
+                let after_ok =
+                    j == bytes.len() || !(bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_');
+                if j > i + 1 && after_ok {
+                    out.insert(line[i..j].to_string());
+                    i = j;
+                    continue;
+                }
+            }
+            // Skip to the end of the current identifier run so we don't match
+            // `t1` inside `foot1bar` etc.
+            if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn negate_condition(cond: &str) -> String {
+        let cond = cond.trim();
+        // Compound boolean conditions: flipping a single comparison operator is
+        // not a valid negation (De Morgan), so wrap the whole expression. This
+        // matches the JS port's `negateCondition`.
+        if cond.contains(" && ") || cond.contains(" || ") {
+            return format!("!({cond})");
+        }
+        // Flip comparison operators
+        for (op, neg) in [
+            (" == ", " != "),
+            (" != ", " == "),
+            (" >= ", " < "),
+            (" <= ", " > "),
+            (" > ", " <= "),
+            (" < ", " >= "),
+        ] {
+            if let Some(pos) = cond.find(op) {
+                return format!("{}{}{}", &cond[..pos], neg, &cond[pos + op.len()..]);
+            }
+        }
+        // Strip leading `!`
+        if let Some(inner) = cond.strip_prefix('!') {
+            return inner.to_string();
+        }
+        format!("!({cond})")
+    }
+}
+
+/// Return `true` when every `name(` call in `expr` starts with a
+/// known-pure helper identifier — i.e. one of the ATC math /
+/// buffer / type-check helpers the lift emits as `name(args)`.
+/// Calls into syscalls, internal/indirect/token-call helpers, or
+/// manifest method names are NOT pure and must keep the temp.
+fn rhs_calls_only_pure_helpers(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut in_string: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(quote) = in_string {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            in_string = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            // Walk back to find the identifier preceding `(`.
+            let mut start = i;
+            while start > 0 {
+                let prev = bytes[start - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if start == i {
+                // `(` with no preceding identifier — likely a
+                // grouping paren (e.g. `(a + b)` inside the RHS).
+                // That's pure; keep scanning.
+                i += 1;
+                continue;
+            }
+            let ident = &expr[start..i];
+            if !is_pure_helper_identifier(ident) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The whitelist of identifiers the high-level lift uses for
+/// known-pure ATC operations. Anything outside this set is treated
+/// as potentially side-effecting (so the inliner won't move calls
+/// across each other or duplicate them by inlining a single-use
+/// temp into a multi-use position).
+fn is_pure_helper_identifier(ident: &str) -> bool {
+    if matches!(
+        ident,
+        // Math / arithmetic helpers (`Math` / `Helper.X` in C#)
+        "abs"
+            | "sign"
+            | "sqrt"
+            | "min"
+            | "max"
+            | "pow"
+            | "modpow"
+            | "modmul"
+            | "within"
+            // Buffer / string helpers
+            | "left"
+            | "right"
+            | "substr"
+            // Type checks (`(x is null)` form lives outside the
+            // call shape and is handled elsewhere; the call form
+            // appears only when the lift falls through to the
+            // generic helper)
+            | "is_null"
+            // Collection accessors that don't mutate state
+            | "keys"
+            | "values"
+            | "has_key"
+            | "len"
+    ) {
+        return true;
+    }
+    // Type-prefixed helpers: `is_type_bool`, `convert_to_integer`,
+    // etc. (suffix is one of ATC's stack-item type names).
+    ident.starts_with("is_type_") || ident.starts_with("convert_to_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::HighLevelEmitter;
+
+    fn brace_balance(statements: &[String]) -> i32 {
+        let mut balance = 0i32;
+        for line in statements {
+            let trimmed = line.trim();
+            balance += trimmed.matches('{').count() as i32;
+            balance -= trimmed.matches('}').count() as i32;
+        }
+        balance
+    }
+
+    #[test]
+    fn invert_empty_if_else_keeps_braces_balanced() {
+        // Regression: the empty-if/else inversion previously deleted the else
+        // block's closing brace, leaving the inverted `if` unterminated.
+        let mut statements = vec![
+            "if cond {".to_string(),
+            "}".to_string(),
+            "else {".to_string(),
+            "loc0 = 5;".to_string(),
+            "}".to_string(),
+            "return loc0;".to_string(),
+        ];
+        HighLevelEmitter::invert_empty_if_else(&mut statements);
+        assert_eq!(brace_balance(&statements), 0, "unbalanced: {statements:?}");
+        let joined = statements.join("\n");
+        assert!(
+            joined.contains("if !(cond) {\nloc0 = 5;\n}"),
+            "inverted if must retain the else body and its closer: {joined}"
+        );
+    }
+
+    #[test]
+    fn eliminate_identity_temps_substitutes_forward() {
+        // `let t0 = t1;` is a trivial alias: t0 must be substituted with t1 in
+        // all following lines and its definition removed.
+        let mut statements = vec![
+            "let t1 = arg0;".to_string(),
+            "let t0 = t1;".to_string(),
+            "return t0;".to_string(),
+        ];
+        HighLevelEmitter::eliminate_identity_temps(&mut statements);
+        assert_eq!(statements[0], "let t1 = arg0;");
+        assert_eq!(statements[1], "", "identity definition must be cleared");
+        assert_eq!(statements[2], "return t1;");
+    }
+
+    #[test]
+    fn eliminate_identity_temps_skips_lhs_used_before_definition() {
+        // When the lhs is referenced *before* its identity definition, forward
+        // substitution would not rewrite the earlier use, so the pass must
+        // leave the identity in place. The first-seen prepass must reproduce
+        // exactly the previous per-candidate backward scan here.
+        let mut statements = vec![
+            "bar(t0);".to_string(),
+            "let t0 = t1;".to_string(),
+            "return t0;".to_string(),
+        ];
+        let before = statements.clone();
+        HighLevelEmitter::eliminate_identity_temps(&mut statements);
+        assert_eq!(
+            statements, before,
+            "identity with a prior use of lhs must be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn invert_empty_if_else_wraps_compound_condition() {
+        // A single operator flip is not a valid negation of `a && b`; the pass
+        // must wrap the whole expression (De Morgan-safe) to match the JS port.
+        let mut statements = vec![
+            "if a == 1 && b == 2 {".to_string(),
+            "}".to_string(),
+            "else {".to_string(),
+            "loc0 = 5;".to_string(),
+            "}".to_string(),
+        ];
+        HighLevelEmitter::invert_empty_if_else(&mut statements);
+        assert_eq!(brace_balance(&statements), 0, "unbalanced: {statements:?}");
+        assert!(
+            statements
+                .iter()
+                .any(|s| s.trim() == "if !(a == 1 && b == 2) {"),
+            "compound condition must be wrapped, not operator-flipped: {statements:?}"
+        );
+    }
+}
